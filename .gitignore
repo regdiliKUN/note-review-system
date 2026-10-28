@@ -12,6 +12,7 @@ _internal/
 _internal.*.bak/
 dist/
 build/
+!build/*.spec
 *.exe
 *.exe.*.bak
 *.spec.bak
