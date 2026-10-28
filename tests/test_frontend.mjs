@@ -138,6 +138,47 @@ t('SEV_RANK 顺序', () => {
   assert.ok(lib.SEV_RANK.medium < lib.SEV_RANK.low);
 });
 
+/* ── DOM 契约：JS 里引用的 #id 必须真的存在于 index.html ── */
+const fs = require('node:fs');
+const html = fs.readFileSync(path.join(ROOT, 'app', 'frontend', 'index.html'), 'utf8');
+const appJs = fs.readFileSync(path.join(ROOT, 'app', 'frontend', 'app.js'), 'utf8');
+
+const htmlIds = new Set([...html.matchAll(/\bid="([\w-]+)"/g)].map(m => m[1]));
+// 有些节点是 JS 动态生成的（例如「加载更多」按钮），它们的 id 写在模板字符串里
+const dynIds = new Set([...appJs.matchAll(/\bid="([\w-]+)"/g)].map(m => m[1]));
+const usedIds = new Set(
+  [...appJs.matchAll(/\$\$?\(\s*['"]#([\w-]+)['"]/g)].map(m => m[1]));
+
+t('index.html 里存在被引用的所有元素 id', () => {
+  const missing = [...usedIds].filter(id => !htmlIds.has(id) && !dynIds.has(id));
+  assert.deepEqual(missing, [], `app.js 引用了不存在的 id: ${missing.join(', ')}`);
+});
+
+t('index.html 的 id 没有重复', () => {
+  const all = [...html.matchAll(/\bid="([\w-]+)"/g)].map(m => m[1]);
+  const dup = all.filter((v, i) => all.indexOf(v) !== i);
+  assert.deepEqual([...new Set(dup)], []);
+});
+
+t('脚本加载顺序：lib.js 必须在 app.js 之前', () => {
+  const iLib = html.indexOf('/lib.js');
+  const iApp = html.indexOf('/app.js');
+  assert.ok(iLib > 0 && iApp > 0, '两个脚本都要被引入');
+  assert.ok(iLib < iApp, 'lib.js 必须先于 app.js 加载，否则 const 未定义');
+});
+
+t('app.js 不再重复声明 lib.js 里的符号', () => {
+  for (const name of ['TYPE_CLS', 'TYPE_COLOR', 'TYPE_LABEL']) {
+    const re = new RegExp(`^\\s*const\\s+${name}\\s*=`, 'm');
+    assert.ok(!re.test(appJs), `${name} 应在 lib.js 中定义，app.js 里不要再声明`);
+  }
+});
+
+t('没有残留的 console.log 调试输出', () => {
+  const hits = [...appJs.matchAll(/^\s*console\.log\(/gm)];
+  assert.deepEqual(hits.map(h => h[0].trim()), []);
+});
+
 /* ── 汇总 ── */
 console.log('='.repeat(62));
 console.log(`前端用例 ${pass + fail}　通过 ${pass}　失败 ${fail}`);

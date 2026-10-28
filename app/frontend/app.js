@@ -92,6 +92,18 @@ function fillSettings(boot) {
 
   fillMediaSettings(boot.media || {}, boot.vision);
 
+  // 审校力度与术语白名单
+  S.level = boot.reviewLevel || 'normal';
+  $$('#levelSeg button').forEach(b => b.classList.toggle('active', b.dataset.l === S.level));
+  if ($('#inpGlossary')) $('#inpGlossary').value = (boot.glossary || []).join('、');
+  if ($('#levelHint')) {
+    $('#levelHint').textContent = {
+      light: '轻：只挑错别字与事实错误，措辞风格差异一律不提。适合已经很成熟的稿子。',
+      normal: '标准：硬错误 + 确实值得改的表达与结构问题。适合大多数笔记。',
+      strict: '严格：连措辞一起优化，并主动补充缺失的定义与前提。适合初稿。'
+    }[S.level];
+  }
+
   const h = boot.history || {};
   if ($('#inpHistDir')) $('#inpHistDir').value = h.dir || '';
   if ($('#histDirHint')) {
@@ -397,6 +409,17 @@ function wire() {
     $$('#provSeg button').forEach(x => x.classList.toggle('active', x === b));
     $('#fieldKey').style.display = S.provider === 'openai' ? '' : 'none';
   });
+  $$('#levelSeg button').forEach(b => b.onclick = () => {
+    S.level = b.dataset.l;
+    $$('#levelSeg button').forEach(x => x.classList.toggle('active', x === b));
+    if ($('#levelHint')) {
+      $('#levelHint').textContent = {
+        light: '轻：只挑错别字与事实错误，措辞风格差异一律不提。适合已经很成熟的稿子。',
+        normal: '标准：硬错误 + 确实值得改的表达与结构问题。适合大多数笔记。',
+        strict: '严格：连措辞一起优化，并主动补充缺失的定义与前提。适合初稿。'
+      }[S.level];
+    }
+  });
   $('#btnTestConn').onclick = async () => {
     const r = await window.pywebview.api.set_provider(
       S.provider, $('#inpBase').value.trim(), $('#inpKey').value, $('#inpModel').value.trim(),
@@ -428,6 +451,10 @@ function wire() {
         parseInt($('#inpFrames').value, 10) || 0);
     }
     if (md) { renderMediaCaps(md.media, md.vision); S.media = md.media; }
+    // 审校力度与术语白名单
+    if ($('#inpGlossary')) {
+      await window.pywebview.api.set_review_opts(S.level || 'normal', $('#inpGlossary').value);
+    }
     const opts = {};
     $$('.checks input').forEach(c => opts[c.dataset.opt] = c.checked);
     if (S.p && S.p.doc) {
@@ -447,6 +474,9 @@ function wire() {
     if (!S.p || !S.p.doc) return toast('请先导入文档', 'err');
     const kind = b.dataset.kind, fmt = b.dataset.fmt;
     if (kind === 'relayout' && !S.p.views.relayout) return toast('请先开启「重新排版」', 'err');
+    if ((kind === 'report' || kind === 'csv') && !S.p.anns.length) {
+      return toast('还没有批注，先跑一次 AI 审查再导出报告', 'err');
+    }
     const r = await window.pywebview.api.choose_export_path(kind);
     if (!r.ok) return;
     const res = await window.pywebview.api.export(kind, fmt, r.path);

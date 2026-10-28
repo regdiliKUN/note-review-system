@@ -1376,5 +1376,122 @@ class TestServer(unittest.TestCase):
         self.assertIn(cm.exception.code, (403, 404))
 
 
+# ══════════════════════════════════════════════════════ 审阅报告
+class TestReport(unittest.TestCase):
+    def _rep(self):
+        from backend import report
+        doc = {"title": "ZBrush 笔记", "path": "D:/a/ZBrush 笔记.docx",
+               "blocks": index([heading("笔刷"), para(txt("DynaMesh 用于重构。"))])}
+        anns = [
+            {"id": "a1", "type": "事实纠错", "severity": "high", "status": "pending",
+             "op": "replace_sentence", "target": "旧句子。", "replacement": "新句子。",
+             "reason": "年份写错了", "block_id": "b1"},
+            {"id": "a2", "type": "表达优化", "severity": "low", "status": "accepted",
+             "op": "insert_after", "target": "旧句子。", "replacement": "补充一句。",
+             "reason": "缺少前提", "block_id": "b1"},
+            {"id": "a3", "type": "结构建议", "severity": "medium", "status": "rejected",
+             "op": "comment", "target": "", "replacement": "",
+             "reason": "建议拆分小节", "block_id": "b1"},
+        ]
+        summary = {"summary": "讲笔刷。", "key_points": ["DynaMesh"], "outline": ["一、笔刷"],
+                   "gaps": ["缺少快捷键"]}
+        ir = {"total": 2, "analyzed": 2, "items": [
+            {"index": 1, "caption": "界面截图", "position": "第2段", "needs_check": True,
+             "check_note": "字太小"},
+            {"index": 2, "caption": "正常图", "position": "第4段"},
+        ], "note": "已分析 2/2"}
+        return report.collect(doc, anns, summary, ir, review.stats(anns),
+                              {"model": "qwen3:8b", "elapsed": 42})
+
+    def test_collect_groups(self):
+        r = self._rep()
+        self.assertEqual(r["title"], "ZBrush 笔记")
+        self.assertEqual(r["stats"]["total"], 3)
+        self.assertEqual(len(r["groups"]), 3, "三种类型应分三组")
+        self.assertEqual(len(r["image_flagged"]), 1)
+
+    def test_html_contains_key_parts(self):
+        from backend import report
+        html = report.to_html(self._rep())
+        for s in ("审阅报告", "ZBrush 笔记", "事实纠错", "年份写错了",
+                  "内容归纳", "图像审查", "@media print"):
+            self.assertIn(s, html)
+
+    def test_html_escapes(self):
+        from backend import report
+        r = self._rep()
+        r["title"] = "<script>x</script>"
+        self.assertNotIn("<script>x", report.to_html(r))
+
+    def test_markdown_has_valid_table(self):
+        from backend import report
+        md = report.to_markdown(self._rep())
+        self.assertIn("| 指标 | 数量 |", md)
+        self.assertIn("| --- | ---: |", md)
+        self.assertIn("### 事实纠错", md)
+
+    def test_csv_has_bom_and_rows(self):
+        from backend import report
+        doc = {"title": "t", "path": "x.docx", "blocks": []}
+        anns = [{"type": "错别字", "severity": "high", "status": "pending",
+                 "op": "replace_sentence", "target": "甲", "replacement": "乙",
+                 "reason": "错字"}]
+        csv_text = report.to_csv(anns)
+        self.assertTrue(csv_text.startswith("\ufeff"), "Excel 需要 BOM 才不乱码")
+        lines = csv_text.strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("错别字", lines[1])
+        self.assertIn("高", lines[1])
+
+    def test_empty_annotations_render_gracefully(self):
+        from backend import report
+        doc = {"title": "空", "path": "e.docx", "blocks": []}
+        r = report.collect(doc, [], {}, {}, review.stats([]), {})
+        self.assertIn("没有发现需要修改的地方", report.to_html(r))
+        self.assertIn("没有发现需要修改的地方", report.to_markdown(r))
+
+    def test_api_exports_report_and_csv(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp(prefix="nr_rep_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            src = os.path.join(tmp, "n.txt")
+            with open(src, "w", encoding="utf-8") as f:
+                f.write("标题\n\n第一句。\n")
+            api.load(src)
+            api.anns = [{"id": "a1", "block_id": "b1", "op": "comment", "type": "结构建议",
+                         "target": "", "replacement": "", "reason": "建议分节",
+                         "severity": "low", "status": "pending", "anchor": None, "sid": None}]
+            api.summary = {"summary": "摘要"}
+            for fmt, ext in (("html", ".html"), ("md", ".md")):
+                out = os.path.join(tmp, "out", "r" + ext)
+                r = api.export("report", fmt, out)
+                self.assertTrue(r["ok"], r.get("error"))
+                self.assertTrue(os.path.getsize(out) > 200)
+            out = os.path.join(tmp, "out", "a.csv")
+            r = api.export("csv", "csv", out)
+            self.assertTrue(r["ok"])
+            self.assertIn("结构建议", open(out, encoding="utf-8-sig").read())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_api_report_rejects_bad_format(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp(prefix="nr_rep2_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            src = os.path.join(tmp, "n.txt")
+            open(src, "w", encoding="utf-8").write("正文。")
+            api.load(src)
+            r = api.export("report", "pdf", os.path.join(tmp, "x.pdf"))
+            self.assertFalse(r["ok"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

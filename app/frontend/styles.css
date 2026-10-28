@@ -616,3 +616,12 @@ kbd{
   background:var(--panel-3);border:1px solid var(--border);
   border-bottom-width:2px;color:var(--txt-2);
 }
+
+/* 设置页多行输入 */
+textarea{
+  width:100%;padding:8px 10px;border-radius:8px;font-family:inherit;font-size:12.5px;
+  background:var(--panel-2);border:1px solid var(--border);color:var(--txt);
+  outline:none;resize:vertical;line-height:1.7;transition:.15s;
+}
+textarea::placeholder{color:var(--txt-3)}
+textarea:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140,255,.12)}

@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 
-from . import docmodel, history as hist, media, relayout as rl, review
+from . import docmodel, history as hist, media, relayout as rl, report as rpt, review
 from .llm import LLM, LLMError
 from .pipeline import analyze_images, review_document, summarize
 
@@ -698,6 +698,7 @@ class Api:
             prog("已取消" if canceled else "审查完成", 1.0)
             self._rebuild_relayout()
             elapsed = round(time.time() - t0, 1)
+            self._last_elapsed = elapsed
             entry = self._save_history(elapsed)      # 自动持久化本次审查
             self.busy = False
             warnings = []
@@ -829,15 +830,17 @@ class Api:
         if not win or not self.doc:
             return {"ok": False}
         base = os.path.splitext(os.path.basename(self.doc["path"]))[0]
-        suffix = {"original": "_原版", "revised": "_修正版", "relayout": "_重排版"}.get(kind, "_修正版")
-        ext = {"docx": ".docx", "html": ".html", "md": ".md", "txt": ".txt"}
-        default = base + suffix
+        suffix = {"original": "_原版", "revised": "_修正版", "relayout": "_重排版",
+                  "report": "_审阅报告", "csv": "_批注清单"}.get(kind, "_修正版")
+        default = base + suffix + time.strftime("_%Y%m%d", time.localtime())
+        types = ("Word 文档 (*.docx)", "网页 (*.html)",
+                 "Markdown (*.md)", "纯文本 (*.txt)", "CSV 表格 (*.csv)")
+        if kind == "csv":
+            types = ("CSV 表格 (*.csv)",) + types
         try:
             import webview
             res = win.create_file_dialog(
-                webview.SAVE_DIALOG, save_filename=default,
-                file_types=("Word 文档 (*.docx)", "网页 (*.html)",
-                            "Markdown (*.md)", "纯文本 (*.txt)"),
+                webview.SAVE_DIALOG, save_filename=default, file_types=types,
             )
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -849,6 +852,9 @@ class Api:
     def export(self, kind: str, fmt: str, out_path: str) -> dict:
         if not self.doc:
             return {"ok": False, "error": "没有可导出的内容"}
+        # 审阅报告 / 批注清单是独立的交付物，不走正文导出链路
+        if kind in ("report", "csv"):
+            return self._export_report(kind, fmt, out_path)
         blocks = self._blocks_for(kind)
         if not blocks:
             return {"ok": False, "error": "没有内容"}
@@ -888,6 +894,42 @@ class Api:
             return {"ok": False, "error": f"导出失败：{e}"}
         return {"ok": True, "path": out_path, "format": fmt}
 
+    def _export_report(self, kind: str, fmt: str, out_path: str) -> dict:
+        """导出审阅报告（html / md）或批注清单（csv）。"""
+        fmt = (fmt or "html").lower().lstrip(".")
+        if kind == "csv":
+            fmt = "csv"
+        if fmt not in ("html", "md", "markdown", "csv"):
+            return {"ok": False, "error": f"审阅报告不支持 {fmt} 格式（可选 html / md / csv）"}
+        fmt = {"markdown": "md"}.get(fmt, fmt)
+        ext_on_path = os.path.splitext(out_path)[1].lower().lstrip(".")
+        if ext_on_path in ("html", "htm", "md", "markdown", "csv"):
+            fmt = {"htm": "html", "markdown": "md"}.get(ext_on_path, ext_on_path)
+        if not out_path.lower().endswith("." + fmt):
+            out_path += "." + fmt
+        parent = os.path.dirname(os.path.abspath(out_path))
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception as e:
+            return {"ok": False, "error": f"无法创建导出目录 {parent}：{e}"}
+        try:
+            if fmt == "csv":
+                rpt.write_csv(self.anns, out_path)
+            else:
+                rep = rpt.collect(
+                    self.doc, self.anns, self.summary, self.image_report,
+                    review.stats(self.anns),
+                    {"model": self.cfg.get("model", ""),
+                     "vision": self.cfg.get("vision_model", ""),
+                     "elapsed": getattr(self, "_last_elapsed", 0)})
+                body = rpt.to_html(rep) if fmt == "html" else rpt.to_markdown(rep)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(body)
+        except Exception as e:
+            traceback.print_exc()
+            return {"ok": False, "error": f"导出报告失败：{e}"}
+        return {"ok": True, "path": out_path, "format": fmt}
+
     def _blocks_for(self, kind: str):
         if kind == "original":
             return self.doc["blocks"]
@@ -920,10 +962,24 @@ class Api:
         n = 0
         for b in blocks:
             if b["kind"] == "table":
-                for row in b.get("rows", []):
-                    lines.append("| " + " | ".join(
-                        "".join(s["v"] for s in c.get("segs", []) if s["t"] == "text")
-                        for c in row) + " |")
+                rows = b.get("rows", [])
+                if not rows:
+                    continue
+                # Markdown 表格必须有分隔行，否则渲染出来是一堆竖线
+                ncol = max(sum(max(1, int(c.get("span") or 1)) for c in r) for r in rows)
+                for ri, row in enumerate(rows):
+                    cells, ci = [], 0
+                    for c in row:
+                        span = max(1, int(c.get("span") or 1))
+                        txt = "".join(s["v"] for s in c.get("segs", []) if s["t"] == "text")
+                        cells.append(txt.replace("\n", " ").replace("|", "\\|"))
+                        ci += span
+                    while ci < ncol:
+                        cells.append("")
+                        ci += 1
+                    lines.append("| " + " | ".join(cells) + " |")
+                    if ri == 0:
+                        lines.append("|" + "|".join([" --- "] * ncol) + "|")
                 lines.append("")
                 continue
             buf = []
