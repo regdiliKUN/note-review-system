@@ -11,7 +11,7 @@ env/
 _internal/
 _internal.*.bak/
 dist/
-build/
+build/*
 !build/*.spec
 *.exe
 *.exe.*.bak
