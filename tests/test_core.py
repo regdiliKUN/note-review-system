@@ -848,5 +848,141 @@ class TestDocModelUtils(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 桥接层
+class TestApi(unittest.TestCase):
+    """Api 是前后端唯一通道，这里覆盖它的状态机与导出契约。"""
+
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_api_")
+        self.assets = os.path.join(self.tmp, "assets")
+        os.makedirs(self.assets, exist_ok=True)
+        self.api = Api(workdir=self.tmp, get_window=lambda: None, asset_root=self.assets)
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.src = os.path.join(self.tmp, "笔记.txt")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("我的笔记\n\n第一句。第二句。\n\n第二段内容。\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_boot_shape(self):
+        r = self.api.boot()
+        self.assertTrue(r["ok"])
+        for k in ("health", "models", "relayoutOpts", "history", "version"):
+            self.assertIn(k, r)
+
+    def test_load_and_payload(self):
+        r = self.api.load(self.src)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["doc"]["blocks"] > 0)
+        for v in ("original", "annotated", "revised"):
+            self.assertIn(v, r["views"])
+        self.assertIn("stats", r)
+
+    def test_load_missing_file(self):
+        r = self.api.load(os.path.join(self.tmp, "nope.txt"))
+        self.assertFalse(r["ok"])
+        self.assertIn("不存在", r["error"])
+
+    def test_load_unsupported_ext(self):
+        p = os.path.join(self.tmp, "a.xyz")
+        open(p, "w").write("x")
+        r = self.api.load(p)
+        self.assertFalse(r["ok"])
+        self.assertIn("暂不支持", r["error"])
+
+    def test_set_status_roundtrip(self):
+        self.api.load(self.src)
+        self.api.anns = [{"id": "a1", "block_id": "b1", "op": "comment", "type": "结构建议",
+                          "target": "", "replacement": "", "reason": "r", "severity": "low",
+                          "status": "pending", "anchor": None, "sid": None}]
+        r = self.api.set_status("a1", "accepted")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["stats"]["accepted"], 1)
+        self.assertEqual(r["anns"][0]["status"], "accepted")
+
+    def test_set_status_unknown_id(self):
+        self.api.load(self.src)
+        r = self.api.set_status("nope", "accepted")
+        self.assertFalse(r["ok"])
+        self.assertIn("不存在", r["error"])
+
+    def test_set_status_bad_value(self):
+        self.api.load(self.src)
+        r = self.api.set_status("a1", "whatever")
+        self.assertFalse(r["ok"])
+
+    def test_bulk_reports_affected(self):
+        self.api.load(self.src)
+        self.api.anns = [
+            {"id": f"a{i}", "block_id": "b1", "op": "comment", "type": t,
+             "target": "", "replacement": "", "reason": "r", "severity": "low",
+             "status": "pending", "anchor": None, "sid": None}
+            for i, t in enumerate(["错别字", "错别字", "事实纠错"])
+        ]
+        r = self.api.bulk("accept", "错别字")
+        self.assertEqual(r["affected"], 2)
+        self.assertEqual(r["stats"]["accepted"], 2)
+
+    def test_bulk_unknown_scope(self):
+        self.api.load(self.src)
+        r = self.api.bulk("accept", "不存在的分类")
+        self.assertFalse(r["ok"])
+
+    def test_manual_note_unique_ids(self):
+        self.api.load(self.src)
+        bid = self.api.doc["blocks"][0]["id"]
+        a = self.api.add_manual_note(bid, "第一条")
+        b = self.api.add_manual_note(bid, "第二条")
+        self.assertTrue(a["ok"] and b["ok"])
+        ids = [x["id"] for x in b["anns"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_manual_note_empty_text(self):
+        self.api.load(self.src)
+        bid = self.api.doc["blocks"][0]["id"]
+        self.assertFalse(self.api.add_manual_note(bid, "   ")["ok"])
+
+    def test_export_infers_format_from_extension(self):
+        self.api.load(self.src)
+        out = os.path.join(self.tmp, "out", "笔记.md")
+        r = self.api.export("revised", "docx", out)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["format"], "md")
+        self.assertTrue(os.path.isfile(out))
+
+    def test_export_creates_missing_dir(self):
+        self.api.load(self.src)
+        out = os.path.join(self.tmp, "a", "b", "c", "o.txt")
+        r = self.api.export("original", "txt", out)
+        self.assertTrue(r["ok"])
+        self.assertTrue(os.path.isfile(out))
+
+    def test_export_unknown_format(self):
+        self.api.load(self.src)
+        r = self.api.export("revised", "pdf", os.path.join(self.tmp, "x.pdf"))
+        self.assertFalse(r["ok"])
+
+    def test_view_cache_recomputes_after_review(self):
+        """同样的批注 id/status、但内容不同的新结果，不能命中旧视图缓存。"""
+        self.api.load(self.src)
+        self.api.anns = [{"id": "a1", "block_id": "b1", "op": "comment", "type": "结构建议",
+                          "target": "", "replacement": "", "reason": "旧", "severity": "low",
+                          "status": "pending", "anchor": None, "sid": None}]
+        self.api._payload()
+        self.api.anns = [{"id": "a1", "block_id": "b1", "op": "comment", "type": "结构建议",
+                          "target": "", "replacement": "", "reason": "新", "severity": "low",
+                          "status": "pending", "anchor": None, "sid": None}]
+        p = self.api._payload()
+        self.assertEqual(p["anns"][0]["reason"], "新")
+
+    def test_quit_blocked_while_busy(self):
+        self.api.busy = True
+        r = self.api.quit()
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["busy"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -260,6 +261,11 @@ class Api:
         ext = os.path.splitext(path)[1].lower()
         if not os.path.exists(path):
             return {"ok": False, "error": "文件不存在"}
+        if os.path.isdir(path):
+            return {"ok": False, "error": "这是一个文件夹，请选择具体文件"}
+        if self.busy:
+            # 审查进行中切换文档会让后台线程把结果写进新文档，直接拒绝
+            return {"ok": False, "error": "正在审查中，请等本次审查完成后再导入其他文件"}
         if ext not in SUPPORTED:
             return {"ok": False,
                     "error": f"暂不支持 {ext} 格式；可导入 docx/doc/txt/md，"
@@ -523,6 +529,19 @@ class Api:
             })
         return out
 
+    def _ann_sig(self):
+        """批注状态指纹：状态没变就不必重算三份视图。
+
+        一千段的文档每次点「保留」都要重新渲染 3 × 1000 个 block 的 token，
+        前端还要接一个几 MB 的 JSON —— 这是交互卡顿的主因。
+        """
+        return tuple((a.get("id"), a.get("status")) for a in self.anns)
+
+    def _toc(self, blocks):
+        return [{"id": b["id"], "level": b.get("level", 1),
+                 "text": "".join(s["v"] for s in b["segs"] if s["t"] == "text")[:60]}
+                for b in blocks if b["kind"] == "heading"]
+
     def _payload(self, extra: dict | None = None) -> dict:
         if not self.doc:
             return {"ok": True, "doc": None}
@@ -530,13 +549,23 @@ class Api:
         blocks = self.doc["blocks"]
         cur = self.blocks_current or blocks
 
-        views = {
-            "original": self._ser_blocks(blocks, anns, "original"),
-            "annotated": self._ser_blocks(blocks, anns, "annotated"),
-            # 修正版基于「原始 blocks + 已采纳修改」渲染，不能拿已经改过的
-            # blocks_current 再套一遍，否则会二次应用、句子错位。
-            "revised": self._ser_blocks(blocks, anns, "revised"),
-        }
+        sig = self._ann_sig()
+        cache = getattr(self, "_view_cache", None)
+        # 缓存键带上 anns 列表本身的引用：重新审查会换掉整个列表对象，
+        # 即使新旧批注的 id/status 恰好相同也不会误用旧视图。
+        if (cache and cache[0] is self.doc and cache[1] is self.anns
+                and cache[2] == sig):
+            views, toc = cache[3], cache[4]
+        else:
+            views = {
+                "original": self._ser_blocks(blocks, anns, "original"),
+                "annotated": self._ser_blocks(blocks, anns, "annotated"),
+                # 修正版基于「原始 blocks + 已采纳修改」渲染，不能拿已经改过的
+                # blocks_current 再套一遍，否则会二次应用、句子错位。
+                "revised": self._ser_blocks(blocks, anns, "revised"),
+            }
+            toc = self._toc(blocks)
+            self._view_cache = (self.doc, self.anns, sig, views, toc)
         payload = {
             "ok": True,
             "doc": {
@@ -553,9 +582,7 @@ class Api:
             "anns": anns,
             "stats": review.stats(anns),
             "views": views,
-            "toc": [{"id": b["id"], "level": b.get("level", 1),
-                     "text": "".join(s["v"] for s in b["segs"] if s["t"] == "text")[:60]}
-                    for b in blocks if b["kind"] == "heading"],
+            "toc": toc,
             "relayoutOn": self.relayout_on,
             "summary": self.summary,
             "imageReport": self.image_report or {"total": 0, "items": [], "note": ""},
@@ -623,7 +650,8 @@ class Api:
 
         try:
             prog("正在准备…", 0.02)
-            anns = review_document(self.doc, llm, on_progress=prog)
+            rep: dict = {}
+            anns = review_document(self.doc, llm, on_progress=prog, report=rep)
             self.anns = anns
             # 图像理解：生成说明、标注位置、识别敏感/不一致/需人工核对
             self.image_report = analyze_images(
@@ -648,10 +676,23 @@ class Api:
             elapsed = round(time.time() - t0, 1)
             entry = self._save_history(elapsed)      # 自动持久化本次审查
             self.busy = False
+            warnings = []
+            if rep.get("failed"):
+                detail = "；".join(f"第 {f['chunk']} 段（{f['error'][:60]}）"
+                                   for f in rep["failed"][:3])
+                warnings.append(f"有 {len(rep['failed'])}/{rep.get('chunks', '?')} 段审查失败："
+                                f"{detail}。其余部分已完成，可稍后重新审查补齐。")
+            if rep.get("empty"):
+                warnings.append(f"有 {rep['empty']} 段模型没有给出任何意见（可能是原文质量较好，"
+                                "也可能该段被截断）。")
+            if not entry:
+                warnings.append("本次结果未能写入审查历史，请检查历史目录是否可写。")
             return self._payload(extra={
                 "elapsed": elapsed,
                 "reviewed": True,
                 "historySaved": entry,
+                "reviewReport": rep,
+                "warnings": warnings,
             })
         except LLMError as e:
             self.busy = False
@@ -662,39 +703,58 @@ class Api:
             return {"ok": False, "error": f"审查出错：{e}"}
 
     def add_manual_note(self, block_id: str, text: str, typ: str = "存疑待核") -> dict:
-        """用户自己加一条批注。"""
+        """用户自己加一条批注。
+
+        id 用 uuid：旧版取「毫秒时间戳 % 100000」，连续加几条会撞 id，
+        点一条批注却高亮了另一条。
+        """
+        import uuid
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "批注内容不能为空"}
+        if self.doc and block_id not in {b["id"] for b in self.doc["blocks"]}:
+            return {"ok": False, "error": "找不到对应的段落"}
+        if typ not in review.TYPES:
+            typ = "存疑待核"
         self.anns.append({
-            "id": f"m{int(time.time() * 1000) % 100000}",
+            "id": f"m{uuid.uuid4().hex[:10]}",
             "block_id": block_id, "op": "comment", "type": typ,
             "target": "", "replacement": "", "reason": text,
-            "severity": "low", "status": "pending", "anchor": None,
+            "severity": "low", "status": "pending", "anchor": None, "sid": None,
         })
         return self._payload()
 
     # ------------------------------------------------------------ 取舍
     def set_status(self, ann_id: str, status: str) -> dict:
+        if status not in ("accepted", "rejected", "pending"):
+            return {"ok": False, "error": f"无效的状态：{status}"}
+        hit = None
         for a in self.anns:
             if a["id"] == ann_id:
-                a["status"] = status if status in ("accepted", "rejected", "pending") else "pending"
+                a["status"] = status
+                hit = a
                 break
+        if hit is None:
+            return {"ok": False, "error": "这条批注不存在（可能已被新一轮审查替换）"}
         self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
         self._rebuild_relayout()
         return self._payload()
 
     def bulk(self, action: str, scope: str = "all") -> dict:
+        if action not in ("accept", "reject", "reset"):
+            return {"ok": False, "error": f"无效的批量操作：{action}"}
         targets = self.anns
-        if scope != "all":
+        if scope and scope != "all":
+            if scope not in review.TYPES:
+                return {"ok": False, "error": f"未知的分类：{scope}"}
             targets = [a for a in self.anns if a["type"] == scope]
+        if not targets:
+            return {"ok": False, "error": "没有符合条件的批注"}
         for a in targets:
-            if action == "accept":
-                a["status"] = "accepted"
-            elif action == "reject":
-                a["status"] = "rejected"
-            else:
-                a["status"] = "pending"
+            a["status"] = {"accept": "accepted", "reject": "rejected"}.get(action, "pending")
         self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
         self._rebuild_relayout()
-        return self._payload()
+        return self._payload(extra={"affected": len(targets)})
 
     # ------------------------------------------------------------ 重排
     def _rebuild_relayout(self):
@@ -745,9 +805,22 @@ class Api:
         # 修正版/重排版追加「图像说明与核对」，让总结覆盖图像部分
         if kind != "original" and self.image_report:
             blocks = list(blocks) + docmodel.image_report_blocks(self.image_report)
-        fmt = fmt.lower().lstrip(".")
+        fmt = (fmt or "").lower().lstrip(".")
+        # 用户在保存对话框里手打了扩展名时，以扩展名为准 ——
+        # 否则会出现「文件名叫 笔记.md，内容却是 docx」这种打不开的情况。
+        ext_on_path = os.path.splitext(out_path)[1].lower().lstrip(".")
+        if ext_on_path in ("docx", "html", "htm", "md", "markdown", "txt"):
+            fmt = {"htm": "html", "markdown": "md"}.get(ext_on_path, ext_on_path)
+        if not fmt:
+            fmt = "docx"
         if not out_path.lower().endswith("." + fmt):
             out_path += "." + fmt
+        # 用户可能手打了一个不存在的目录
+        parent = os.path.dirname(os.path.abspath(out_path))
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception as e:
+            return {"ok": False, "error": f"无法创建导出目录 {parent}：{e}"}
         asset_dir = self.doc["asset_dir"]
         try:
             if fmt == "docx":
@@ -763,7 +836,7 @@ class Api:
         except Exception as e:
             traceback.print_exc()
             return {"ok": False, "error": f"导出失败：{e}"}
-        return {"ok": True, "path": out_path}
+        return {"ok": True, "path": out_path, "format": fmt}
 
     def _blocks_for(self, kind: str):
         if kind == "original":
@@ -784,6 +857,15 @@ class Api:
         d = os.path.dirname(out_path)
         stem = os.path.splitext(os.path.basename(out_path))[0]
         imdir = os.path.join(d, stem + "_图片")
+        # 同一份笔记反复导出到同一位置时，旧图片会越积越多。
+        # 只清理本程序自己产出的 `NNN_xxx.ext`，绝不碰用户放进去的其他文件。
+        if os.path.isdir(imdir):
+            for fn in os.listdir(imdir):
+                if re.match(r"^\d{3}_.+\.[A-Za-z0-9]+$", fn):
+                    try:
+                        os.remove(os.path.join(imdir, fn))
+                    except Exception:
+                        pass
         lines = [f"# {self.doc['title']}", ""]
         n = 0
         for b in blocks:
@@ -851,6 +933,10 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def quit(self) -> dict:
+        """退出。审查进行中先问一句 —— 点叉直接丢掉半小时的审查结果太伤。"""
+        if self.busy:
+            return {"ok": False, "busy": True,
+                    "error": "正在审查中，现在退出会丢失本次结果。确定要退出吗？"}
         win = self.get_window()
         if win:
             win.destroy()
