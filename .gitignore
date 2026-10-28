@@ -1,0 +1,43 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build-env*/
+env/
+
+# ---- 打包产物（体积大，不入库）----
+_internal/
+_internal.*.bak/
+dist/
+build/
+*.exe
+*.exe.*.bak
+*.spec.bak
+
+# ---- 运行时数据 ----
+data/assets/
+data/webview/
+data/app.log
+data/config.json
+app/data/
+history/
+导出结果/
+*.log
+
+# ---- 测试与缓存 ----
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+.ruff_cache/
+.mypy_cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*

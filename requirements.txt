@@ -1,0 +1,9 @@
+# 运行时依赖（打包 / 源码运行都需要）
+pywebview>=5.0          # 桌面窗口（Windows 走 EdgeChromium / WebView2）
+python-docx>=1.1        # .docx 读写
+lxml>=5.0               # python-docx 的 XML 后端，.doc 解析也会用到
+
+# 可选依赖：缺失时程序自动降级，不会崩
+# Pillow>=10.0          # 图片尺寸读取 / 送审前压缩（没有则直接送原图）
+# faster-whisper>=1.0   # 本机语音转写（没有则可用 OpenAI 兼容 ASR 接口）
+# pyinstaller>=6.0      # 仅打包时需要

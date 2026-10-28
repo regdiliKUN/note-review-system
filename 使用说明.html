@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>笔记审查总结系统 · 使用说明</title>
+<style>
+  :root{
+    --ink:#1b2430; --ink2:#4a5568; --ink3:#8b95a8;
+    --line:#e6eaf1; --bg:#f7f9fc; --card:#ffffff;
+    --blue:#4f8cff; --violet:#7c5cff; --green:#16a34a;
+    --red:#dc2626; --amber:#d97706;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:"Microsoft YaHei UI","Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    background:var(--bg); color:var(--ink); line-height:1.85; font-size:15px;
+    padding:0 0 80px;
+  }
+  .wrap{max-width:880px;margin:0 auto;padding:0 24px}
+  header{
+    background:linear-gradient(135deg,#4f8cff,#7c5cff); color:#fff;
+    padding:46px 0 40px; margin-bottom:34px;
+  }
+  header .wrap{display:flex;align-items:center;gap:20px}
+  .logo{
+    width:62px;height:62px;border-radius:16px;flex:none;
+    background:rgba(255,255,255,.18); display:grid;place-items:center;
+    border:1px solid rgba(255,255,255,.35);
+  }
+  .logo svg{width:32px;height:32px}
+  header h1{font-size:25px;letter-spacing:.5px;margin-bottom:6px}
+  header p{opacity:.9;font-size:13.5px}
+
+  /* 首屏行动块 */
+  .start{
+    background:var(--card);border:2px solid var(--blue);border-radius:16px;
+    padding:30px 32px;margin-bottom:34px;
+    box-shadow:0 12px 32px rgba(79,140,255,.13);
+  }
+  .start .step-no{
+    display:inline-block;background:var(--blue);color:#fff;font-size:12px;
+    font-weight:700;padding:2px 10px;border-radius:20px;margin-bottom:14px;
+    letter-spacing:.5px;
+  }
+  .start h2{font-size:20px;margin-bottom:14px;line-height:1.5}
+  .start .big{
+    display:inline-block;background:linear-gradient(135deg,#4f8cff,#7c5cff);
+    color:#fff;font-size:17px;font-weight:600;padding:14px 30px;
+    border-radius:11px;margin:6px 0 16px;
+    box-shadow:0 8px 22px rgba(96,120,255,.32);
+  }
+  .start .path{
+    font-family:Consolas,Monaco,monospace;font-size:13px;
+    background:#f1f5fb;border:1px solid var(--line);border-radius:8px;
+    padding:10px 14px;color:var(--ink2);margin-bottom:14px;
+    word-break:break-all;
+  }
+  .start .path b{color:var(--ink)}
+  .start p{color:var(--ink2);font-size:14px}
+
+  h2.sec{
+    font-size:19px;margin:44px 0 18px;padding-left:13px;
+    border-left:4px solid var(--blue);line-height:1.3;
+  }
+  h3{font-size:15.5px;margin:26px 0 10px;color:var(--ink)}
+  p{margin:11px 0;color:var(--ink2)}
+  ul,ol{margin:11px 0 11px 22px;color:var(--ink2)}
+  li{margin:7px 0}
+  b,strong{color:var(--ink);font-weight:600}
+  code{
+    font-family:Consolas,Monaco,monospace;font-size:13px;
+    background:#eef2f9;padding:1px 6px;border-radius:4px;color:#2d4a7c;
+  }
+  pre.tree{
+    font-family:Consolas,Monaco,monospace;font-size:12.5px;line-height:1.85;
+    background:#f6f8fc;border:1px solid var(--line);border-left:3px solid #4f8cff;
+    border-radius:8px;padding:14px 16px;margin:14px 0;overflow-x:auto;
+    color:#2d3a52;white-space:pre;
+  }
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;
+  }
+  .card h4{font-size:14.5px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13.5px;margin:0;line-height:1.75}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+
+  table{
+    width:100%;border-collapse:collapse;margin:16px 0;font-size:13.8px;
+    background:var(--card);border-radius:10px;overflow:hidden;
+  }
+  th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f2f6fd;font-weight:600;font-size:13px;color:var(--ink2);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  td code{font-size:12.5px}
+
+  .note{
+    background:#fffbeb;border:1px solid #fde68a;border-radius:10px;
+    padding:14px 18px;margin:16px 0;font-size:13.8px;color:#7c5a10;
+  }
+  .note b{color:#8a5a00}
+  .tip{
+    background:#f0f7ff;border:1px solid #cfe3ff;border-radius:10px;
+    padding:14px 18px;margin:16px 0;font-size:13.8px;color:#28527a;
+  }
+  .tip b{color:#1b4b7a}
+
+  .faq{border-top:1px solid var(--line);padding-top:8px}
+  .faq details{
+    background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:13px 18px;margin:10px 0;
+  }
+  .faq summary{cursor:pointer;font-weight:600;font-size:14.5px;color:var(--ink);list-style:none}
+  .faq summary::-webkit-details-marker{display:none}
+  .faq summary::before{content:"▸ ";color:var(--blue);font-weight:700}
+  .faq details[open] summary::before{content:"▾ "}
+  .faq details p{font-size:13.6px;margin:10px 0 2px}
+
+  footer{
+    margin-top:52px;padding-top:22px;border-top:1px solid var(--line);
+    font-size:12.5px;color:var(--ink3);text-align:center;line-height:2;
+  }
+  @media (max-width:700px){
+    .grid{grid-template-columns:1fr}
+    header .wrap{flex-direction:column;text-align:center}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7">
+        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6.5A2.5 2.5 0 0 1 4 18.5z"/>
+        <path d="M8 8h8M8 12h8M8 16h4"/>
+      </svg>
+    </div>
+    <div>
+      <h1>笔记审查总结系统</h1>
+      <p>导入 Word / 文本笔记 → AI 逐条审校批注 → 你决定取舍 → 导出干净的成品</p>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- 第一步 -->
+  <div class="start">
+    <span class="step-no">第一步</span>
+    <h2>双击桌面上的这个图标，程序就会打开</h2>
+    <div class="big">笔记审查总结系统</div>
+    <div class="path">
+      程序本体在：<b>I:\workbuddy\笔记审查总结系统\笔记审查总结系统.exe</b><br>
+      快捷方式在：<b>D:\Desktop\笔记审查总结系统.lnk</b>
+    </div>
+    <p>在桌面图标上右键 →「打开文件所在位置」，会直接跳到 <b>I:\workbuddy\笔记审查总结系统</b>，
+       那里就是程序所在目录。整个程序不联网、不安装、不写注册表，绿色运行。</p>
+    <p style="margin-top:12px;font-size:13.5px;color:#8b95a8">
+       第一次用可以先拿 <b style="color:#4a5568">I:\workbuddy\笔记审查总结系统\示例笔记.docx</b> 试一下，
+       里面有图文混排和几处故意写错的地方，正好用来看批注效果。</p>
+  </div>
+
+  <div class="tip">
+    <b>用 AI 审查之前，请确认 Ollama 已经启动。</b>
+    本程序调用你本机的 Ollama 来做审校，不需要 API Key、不花钱、内容不出本机。
+    正常情况下 Ollama 开机自启；如果顶栏右上角的小圆点是灰色，说明没连上，
+    打开「开始菜单 → Ollama」启动一次即可。
+  </div>
+
+  <!-- 界面 -->
+  <h2 class="sec">界面长什么样</h2>
+  <p>整个窗口分三块：左边是文档大纲，中间是笔记正文，右边是批注清单。</p>
+
+  <div class="grid">
+    <div class="card">
+      <h4><span class="dot" style="background:#4f8cff"></span>顶部工具栏</h4>
+      <p>「导入文档」选文件，「开始 AI 审查」让模型通读全文并给出批注，
+         右边可以切换用哪个本地模型；最右侧两个图标分别是<b>审查历史</b>（时钟）和<b>设置</b>（齿轮）。</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:#7c5cff"></span>五个视图按钮</h4>
+      <p>全部批注 / 原版笔记 / 修正后版本 / 重新排版 / <b>图像审查</b>。点一下就能切，
+         随时来回对比，正文位置不会乱跳。</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:#16a34a"></span>右侧批注清单</h4>
+      <p>每条批注都写明<b>改了什么</b>和<b>为什么改</b>，底部两个按钮决定
+         「保留」还是「丢弃」。</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:#d97706"></span>底部状态栏</h4>
+      <p>实时显示待定 / 保留 / 丢弃各多少条，右下角是导出按钮。</p>
+    </div>
+  </div>
+
+  <h3>三个入口图标怎么认（v1.1.1 重新绘制）</h3>
+  <p>三个图标统一 24×24 线性风格、统一线宽与圆角，含义一眼可分：</p>
+  <ul>
+    <li><b>导入文档</b>（蓝色按钮，左上角）：箭头<b>朝下落入托盘</b> —— 把文件「收进来」。</li>
+    <li><b>导出</b>（右下角）：箭头<b>朝上送出托盘</b> —— 把结果「送出去」。</li>
+    <li><b>设置</b>（右上角齿轮）：完整的齿轮 —— 只负责设置，不承担任何导入导出功能。</li>
+  </ul>
+  <div class="tip">
+    <b>之前的问题已修掉：</b>导入按钮曾误用「上传/导出」图标、导出按钮曾误用「下载/导入」图标，
+    两个语义正好反着；右上角齿轮的图形路径被截断，只画出半圈波浪线。现在三者已彻底分开，
+    不会再混用。
+  </div>
+
+  <!-- 流程 -->
+  <h2 class="sec">完整操作流程</h2>
+
+  <h3>1. 导入文档</h3>
+  <p>点左上角「导入文档」，选择 <code>.docx</code>、<code>.txt</code> 或 <code>.md</code> 文件。
+     导入后左侧会列出文档大纲、段落数、图片数。</p>
+  <div class="note">
+    <b>图片不会丢（v1.1 已修复 .doc 图片丢失）。</b>原文里的图片在解析、批改、重排、导出的每一步都被当作
+    「不可拆分的一块」单独保存，按<b>原始格式与清晰度</b>落盘（PNG/JPEG 原样字节，不压缩、不转格式），
+    文字怎么改都只会动文字，图片停在原位。段落中间夹着图片的混排情况也一样安全。
+    <br><br>
+    <b>.doc（Word 97-2003）</b>此前只能读到文字、图片全部丢失，且 WPS 生成的 .doc 还会中文乱码；
+    现已重写解析：从文档的 <code>Data</code> / <code>WordDocument</code> 数据流中按原始字节无损抠出全部图片，
+    再按正文里的图片占位符（<code>0x0001/0x0008</code>）<b>原位插回</b>。
+    实测一篇 73MB 的 ZBrush 笔记可完整还原 <b>488 张</b>图片，中文正常显示。
+  </div>
+
+  <h3>2. 让 AI 审校</h3>
+  <p>点「开始 AI 审查」，模型会通读全文，从七个角度找问题：</p>
+  <table>
+    <tr><th>批注类型</th><th>说明</th></tr>
+    <tr><td><b>错别字</b></td><td>错字、别字、同音误用、标点不规范</td></tr>
+    <tr><td><b>事实纠错</b></td><td>事实、数据、年份、人名、概念写错了</td></tr>
+    <tr><td><b>知识补充</b></td><td>缺少的关键定义、前提、例子、背景</td></tr>
+    <tr><td><b>表达优化</b></td><td>啰嗦、指代不清、语序乱、太口语</td></tr>
+    <tr><td><b>逻辑归纳</b></td><td>把散落的同类要点合并提炼</td></tr>
+    <tr><td><b>结构建议</b></td><td>层级混乱、缺标题、段落切分不当</td></tr>
+    <tr><td><b>存疑待核</b></td><td>模型没法确定，需要你自己核实</td></tr>
+  </table>
+  <p>正文里会出现彩色高亮，颜色对应批注类型；右侧清单里每条都带
+     <b>修改前后对照</b>和<b>修改理由</b>，右上角的小圆点表示严重程度
+     （红＝重要，黄＝一般，灰＝参考）。</p>
+
+  <!-- 图像审查 -->
+  <h2 class="sec">图像也进审查体系（v1.1 新增）</h2>
+  <p>除了文字，程序会把文档里的图片也当成审查对象。审查完成后点顶部 <b>「图像审查」</b> 标签页，
+     能看到每张图片的缩略图、说明和它在原文中的位置。</p>
+  <div class="grid">
+    <div class="card">
+      <h4><span class="dot" style="background:#4f8cff"></span>逐图说明 + 定位</h4>
+      <p>为每张图生成一句简要说明（截图 / 图表 / 流程图 / 公式 / 手写笔记…），
+         并标注它所在的段落、属于哪个小节。</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:#ef4444"></span>三类问题自动标红</h4>
+      <p><b>含敏感信息</b>（手机号、证件号、密钥等）、<b>与正文不一致</b>（图不对题）、
+         <b>需人工核对</b>（模糊、看不清、信息不完整）。</p>
+    </div>
+  </div>
+  <div class="tip">
+    <b>v1.1.1 起已内置视觉模型，开箱即用。</b>本机已装好 <code>qwen2.5vl:7b</code>，
+    并已写入设置（设置 → 视觉模型），点「开始 AI 审查」就会自动逐图识别，无需再手动配置。
+    想换更强的模型，在「设置 → 视觉模型」里改成 <code>llava</code>、<code>minicpm-v</code>
+    或 OpenAI 兼容的 <code>gpt-4o</code> 即可；清空则退回「只标注位置、全部人工核对」的模式，
+    仍然绝不丢图、也不会报错。
+  </div>
+  <div class="tip">
+    <b>关于速度：</b>每张图约 2～3 秒，程序会同时处理 3 张。像 488 张图的笔记，
+    整篇识别大约需要 15～20 分钟，进度条会实时显示「正在理解图片 128/488…」。
+    原图不会因为识别而变模糊 —— 压缩只作用于「送模型看的那份副本」，
+    磁盘上的原图、界面显示和导出始终保持原始格式与清晰度。
+  </div>
+  <p>图像问题会和文字批注一起进入右侧问题清单，可逐条追溯；导出的「修正后版本 / 重排版版本」
+     末尾也会自动附上<b>「图像说明与核对」</b>清单，让总结同时覆盖文字与图像两部分。</p>
+
+  <!-- 审查历史 -->
+  <h2 class="sec">审查历史：同一个文件不用审第二遍（v1.1.2 新增）</h2>
+  <p>每完成一次审查，结果都会<b>自动存到本地</b>。下次再打开同一个文件，
+     程序会直接把上次的批注、总结、图像审查结果接回来，<b>不再调用模型</b>，
+     省下十几分钟甚至更久。</p>
+  <div class="grid">
+    <div class="card">
+      <h4><span class="dot" style="background:#4f8cff"></span>按文件区分</h4>
+      <p>历史跟「文件路径」绑定，A 笔记和 B 笔记互不干扰；
+         同一个文件审过几次，就攒下几条记录，可以随时回看、来回切换。</p>
+    </div>
+    <div class="card">
+      <h4><span class="dot" style="background:#16a34a"></span>文件改过不会乱套</h4>
+      <p>如果文件在审查之后被改动过，程序<b>不会</b>偷偷套用旧结果，
+         而是提示「文件已变化」，由你决定是回看旧记录还是重新审查。</p>
+    </div>
+  </div>
+
+  <h3>怎么看历史</h3>
+  <p>点右上角的 <b>时钟图标</b>（就在齿轮左边），会打开「审查历史」面板，里面能看到：</p>
+  <ul>
+    <li><b>存储位置</b>：完整路径，旁边有 <b>「打开文件夹」</b> 按钮，一键用资源管理器打开；</li>
+    <li><b>当前文件的每一条记录</b>：时间、批注数、图片数、用的模型、耗时；</li>
+    <li>每条右侧的 <b>「载入」</b> 可以直接切到那次的结果，<b>「删除」</b> 删掉单条；</li>
+    <li>底部 <b>「清空本文件历史」</b> 一次清干净。</li>
+  </ul>
+  <div class="tip">
+    <b>存储位置默认就在程序目录里</b>：<code>I:\workbuddy\笔记审查总结系统\history</code>。
+    也就是说，程序装在哪，历史就存在哪，不会偷偷往 C 盘塞东西。
+    设置里也能看到这个路径，并同样带「打开文件夹」按钮。
+    想换地方，点「更改目录」选一个新文件夹即可（已有的旧记录不会自动搬过去）。
+  </div>
+
+  <h3>存储格式（想备份或迁移时看）</h3>
+  <p>纯 JSON 文件，UTF-8 编码，没有任何数据库，拷走目录就等于备份：</p>
+  <pre class="tree">history\
+  └─ Zbrush笔记_a1b2c3d4e5\          ← 每个文件一个文件夹（文件名 + 路径哈希）
+       ├─ meta.json                   ← 这个文件的路径、大小、修改时间 + 历次记录索引
+       ├─ 20261023-175301.json        ← 一次审查的完整快照
+       └─ 20261022-201133.json        ← 更早的一次
+
+一次快照里存的东西：
+  批注列表（anns）· 总结（summary）· 图像审查结果（image_report）
+  模型名 · 视觉模型名 · 耗时 · 当时文件的大小与修改时间</pre>
+  <p>每个文件默认保留最近 <b>8</b> 次，超出的旧快照会自动删掉，避免越攒越大。
+     想多留几次，改 <code>data\config.json</code> 里的 <code>history_keep</code> 即可。</p>
+
+  <h3>3. 逐条取舍</h3>
+  <p>这是整个程序的核心。对每一条批注，你有三种做法：</p>
+  <ul>
+    <li>点 <b>保留</b> —— 这条修改进入「修正后版本」</li>
+    <li>点 <b>丢弃</b> —— 这条不要，原文保持不变</li>
+    <li>先不管 —— 保持「待定」，最后再统一处理</li>
+  </ul>
+  <p>右侧顶部的 <b>全部保留</b> / <b>全部撤销</b> 可以一次性处理所有批注。
+     清单上方还能按「待处理 / 已保留 / 已丢弃」筛选。</p>
+  <div class="tip">
+    <b>快捷键：</b>按 <code>1</code><code>2</code><code>3</code><code>4</code> 快速切换四个视图；
+    选中某条批注后按 <code>Enter</code> 保留、按 <code>Delete</code> 丢弃。
+  </div>
+
+  <h3>4. 需要重新排版吗？</h3>
+  <p>工具栏右上角有个「重新排版」开关，默认关闭。打开后会自动生成第四个视图：</p>
+  <ul>
+    <li>自动生成 <b>内容提要</b> 和 <b>要点</b>（把整篇笔记归纳成几句话）</li>
+    <li>生成 <b>目录</b>，标题按「一、/（一）/ 1.」自动编号</li>
+    <li>补齐缺失的标题层级，合并被硬换行切断的句子</li>
+    <li>规整多余空格和重复标点</li>
+  </ul>
+  <div class="note">
+    <b>重排只调整「怎么呈现」，不打乱「讲什么」。</b>
+    段落顺序完全不动，图片跟着它所在的段落走，
+    所以原来在哪张图旁边的文字，重排后还在那张图旁边。
+  </div>
+  <p>具体项目可以在右上角齿轮「设置」里逐项开关。</p>
+
+  <h3>5. 导出</h3>
+  <p>点右下角「导出」，选格式和版本：</p>
+  <table>
+    <tr><th>格式</th><th>适合</th></tr>
+    <tr><td><b>Word（.docx）</b></td><td>要交作业、交报告、继续编辑 —— 图片已嵌入文档</td></tr>
+    <tr><td><b>网页（.html）</b></td><td>要发给别人看、要打印 —— 双击就能在浏览器打开</td></tr>
+    <tr><td><b>Markdown（.md）</b></td><td>要放进 Obsidian / 笔记软件 —— 图片会单独存一个文件夹</td></tr>
+    <tr><td><b>纯文本（.txt）</b></td><td>只要文字，图片用「[图片N]」占位</td></tr>
+  </table>
+  <p>版本有三种：<b>修正后版本</b>（采纳了你保留的修改）、
+     <b>重排版版本</b>（再加排版和提要）、<b>原版笔记</b>（完全没动过的原文）。
+     导出完成后会自动帮你打开文件所在文件夹。</p>
+
+  <!-- 常见问题 -->
+  <h2 class="sec">常见问题</h2>
+  <div class="faq">
+
+    <details>
+      <summary>右上角小圆点是灰的 / 红点，AI 审查点不动</summary>
+      <p>说明程序连不上 Ollama。先确认 Ollama 在运行：开始菜单里找到 Ollama 打开一次，
+         它会在后台常驻。然后点右上角齿轮进「设置」，点一下「测试连接」，
+         看到「连接成功」就可以了。如果装的是别的服务，把「服务地址」改成对应地址。</p>
+    </details>
+
+    <details>
+      <summary>模型怎么选？qwen3:8b 和更大的模型差在哪</summary>
+      <p>顶栏右侧的下拉框可以切换。8B 级别的模型速度快（一篇几千字的笔记几十秒出结果），
+         够用来找错别字、标点和明显的表达问题；
+         27B 级别的模型判断更准、能发现更多事实性问题，但速度会慢好几倍。
+         日常改稿建议先用快的，重要文档再换大的重跑一次。</p>
+    </details>
+
+    <details>
+      <summary>批注说得不对怎么办</summary>
+      <p>直接点「丢弃」就行。模型给的是建议，不是判决 —— 每条都写明了理由，
+         就是为了让你能一眼判断该不该采纳。丢弃的批注不会影响原文，
+         也不会进入导出结果。</p>
+    </details>
+
+    <details>
+      <summary>原文的图片会不会在批改过程中被弄丢或挪位置</summary>
+      <p>不会。程序在解析时就把每张图片按原始字节单独抽出来存成文件（保留原格式，不做有损压缩或强制转格式），
+         并在正文里标记它「夹在哪两个文字片段之间」。
+         批改只替换文字片段内部的内容，图片所在的片段既不会被删、也不会被移动。
+         重新排版时段落顺序不变，图片自然跟着原段落走。
+         导出时图片按原位重新嵌入。图片不会集中到文末，也不会被占位符或链接替代。</p>
+    </details>
+
+    <details>
+      <summary>为什么以前 .doc 文件的图片全没了，现在还会吗</summary>
+      <p>以前 .doc 只做了「文字提取」，图片数据所在的 <code>Data</code> 流根本没读，所以一张都出不来；
+         WPS 生成的 .doc 还会因为编码判断错误而整篇乱码。v1.1 已重写 .doc 解析：
+         从 <code>Data</code> / <code>WordDocument</code> 流无损抠出全部 PNG/JPEG，
+         并按正文占位符原位插回，同时修正了编码判断。现在 .doc 的图片和中文都能正常还原。</p>
+    </details>
+
+    <details>
+      <summary>支持 .doc 老格式吗</summary>
+      <p>支持直接读 <code>.doc</code>（Word 97-2003 二进制格式，程序内置解析器直接提取正文<b>与图片</b>，
+         图片按原位还原）。
+         <code>.docx</code>、<code>.txt</code> 和 <code>.md</code> 也可以直接导入，Markdown 里的图片引用也会一并读进来。</p>
+    </details>
+
+    <details>
+      <summary>导入的文件和导出的结果存在哪</summary>
+      <p>导入时图片会被复制一份到 <code>I:\workbuddy\笔记审查总结系统\data\assets\</code> 下做缓存，
+         原文件不会被修改。导出默认存到你选择的位置；如果直接回车确认，
+         会存到 <code>I:\workbuddy\笔记审查总结系统\导出结果\</code>。程序配置在
+         <code>I:\workbuddy\笔记审查总结系统\data\config.json</code>，
+         审查历史在 <code>I:\workbuddy\笔记审查总结系统\history\</code>
+         （右上角时钟图标 → 「打开文件夹」可直接定位）。</p>
+    </details>
+
+    <details>
+      <summary>审查历史会不会把 C 盘塞满</summary>
+      <p>不会。历史默认就写在<b>程序自己所在的目录</b>（本机是 I 盘），跟程序放在一起。
+         只有当 I 盘不可写、程序目录也写不进时，才会回退到
+         <code>%LOCALAPPDATA%\NoteReview\history</code>，
+         并且会在「审查历史」面板顶部用黄色提示明确告诉你。
+         每个文件只保留最近 8 次，占用很小。</p>
+    </details>
+
+    <details>
+      <summary>能同时处理多篇笔记吗</summary>
+      <p>一次处理一篇。处理完导出，再导入下一篇。之前打开的文档会留在欢迎页的「最近打开」里。</p>
+    </details>
+
+  </div>
+
+  <!-- 目录结构 -->
+  <h2 class="sec">程序目录里都有什么</h2>
+  <p>一般不用管这些，需要排查问题时可以对照：</p>
+  <table>
+    <tr><th>位置</th><th>作用</th></tr>
+    <tr><td><code>笔记审查总结系统.exe</code></td><td>主程序，双击它就能运行</td></tr>
+    <tr><td><code>_internal\</code></td><td>运行依赖（Python 运行时、界面组件），不要删</td></tr>
+    <tr><td><code>data\</code></td><td>配置文件和导入文档的图片缓存</td></tr>
+    <tr><td><code>history\</code></td><td>审查历史（每个文件一个文件夹，纯 JSON，可整目录备份）</td></tr>
+    <tr><td><code>导出结果\</code></td><td>导出文件的默认位置</td></tr>
+    <tr><td><code>app\</code></td><td>源代码，改功能或重新打包时用</td></tr>
+  </table>
+
+  <footer>
+    笔记审查总结系统 v1.1.2<br>
+    本地运行 · 数据不出本机 · 无需联网<br>
+    程序目录：I:\workbuddy\笔记审查总结系统
+  </footer>
+</div>
+
+</body>
+</html>
