@@ -453,21 +453,7 @@ class Api:
                 self._err(f"解析失败：{path}")
                 return {"ok": False, "error": f"解析失败：{e}"}
 
-            self.doc = {
-                "title": parsed["title"],
-                "blocks": parsed["blocks"],
-                "path": path,
-                "doc_id": doc_id,
-                "asset_dir": store.dir,
-                "source_type": parsed.get("source_type") or "doc",
-                "media": parsed.get("media") or {},
-            }
-            self.anns = []
-            self.summary = {}
-            self.image_report = {}
-            self.relaid = None
-            self.relayout_on = False
-            self.blocks_current = parsed["blocks"]
+            self._install_doc(parsed, path, doc_id, store)
 
             # 同一文件若审查过，直接把上次结果接回来，不重复送模型
             restored = self._restore_history(path)
@@ -478,6 +464,76 @@ class Api:
             self._save_cfg()
 
             return self._payload(extra={"loaded": True, "history": restored})
+
+    def _install_doc(self, parsed: dict, path: str, doc_id: str, store) -> None:
+        """把解析结果装进当前会话（load / load_images 共用）。"""
+        self.doc = {
+            "title": parsed["title"],
+            "blocks": parsed["blocks"],
+            "path": path,
+            "doc_id": doc_id,
+            "asset_dir": store.dir,
+            "source_type": parsed.get("source_type") or "doc",
+            "media": parsed.get("media") or {},
+        }
+        self.anns = []
+        self.summary = {}
+        self.image_report = {}
+        self.relaid = None
+        self.relayout_on = False
+        self.blocks_current = parsed["blocks"]
+        self._img_doc = None          # 让图片计数缓存失效
+        self._view_cache = None
+
+    def choose_images(self) -> dict:
+        """一次选多张图片，合成一篇图片笔记。"""
+        win = self.get_window()
+        if not win:
+            return {"ok": False}
+        try:
+            import webview
+            res = win.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=True,
+                file_types=("图片 (*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.gif)",
+                            "所有文件 (*.*)"))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not res:
+            return {"ok": False, "canceled": True}
+        paths = [res] if isinstance(res, str) else list(res)
+        return self.load_images(paths)
+
+    def load_images(self, paths) -> dict:
+        if self.busy:
+            return {"ok": False, "error": "正在审查中，请等本次审查完成后再导入"}
+        paths = [os.path.abspath(p) for p in (paths or []) if os.path.isfile(p)]
+        if not paths:
+            return {"ok": False, "error": "没有可导入的图片"}
+        for p in paths:
+            if os.path.splitext(p)[1].lower().lstrip(".") not in media.IMAGE_EXT:
+                return {"ok": False, "error": f"不是支持的图片格式：{os.path.basename(p)}"}
+        with self._lock:
+            # 多图合成一篇：doc_id 取所有路径的联合哈希，顺序变化不影响结果
+            doc_id = _sha("|".join(sorted(paths)) + str(len(paths)))
+            store = docmodel.ImageStore(self.asset_root, doc_id)
+            title = ("、".join(os.path.splitext(os.path.basename(p))[0] for p in paths[:3])
+                     + ("等" if len(paths) > 3 else ""))
+            try:
+                self._push("progress", {"msg": "正在解析图片…", "pct": 0.02})
+                parsed = media.parse_many_images(
+                    paths, store, self._llm(), title,
+                    on_progress=lambda m, p: self._push(
+                        "progress", {"msg": m, "pct": round(0.02 + 0.08 * p, 3)}))
+            except Exception as e:
+                self._err("多图导入失败")
+                return {"ok": False, "error": f"解析失败：{e}"}
+            anchor = paths[0]
+            self._install_doc(parsed, anchor, doc_id, store)
+            recent = [p for p in self.cfg.get("recent", []) if p != anchor]
+            recent.insert(0, anchor)
+            self.cfg["recent"] = recent[:12]
+            self._save_cfg()
+            return self._payload(extra={"loaded": True, "imageCount": len(paths)})
 
     def load_recent(self, path: str) -> dict:
         return self.load(path)

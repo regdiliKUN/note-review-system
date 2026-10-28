@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -54,6 +55,16 @@ def find_ffmpeg(cfg: Optional[dict] = None) -> Tuple[str, str]:
     which = shutil.which("ffmpeg")
     if which:
         cands.append(which)
+    # 绿色版常见做法：把 ffmpeg 放在程序自己目录下（或 bin / tools 子目录）
+    try:
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for sub in ("", "bin", "tools", os.path.join("tools", "ffmpeg"),
+                    os.path.join("tools", "ffmpeg", "bin")):
+            for exe in ("ffmpeg.exe", "ffmpeg"):
+                cands.append(os.path.join(here, sub, exe))
+                cands.append(os.path.join(os.path.dirname(here), sub, exe))
+    except Exception:
+        pass
     roots = [os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles", ""),
              os.environ.get("USERPROFILE", ""), "C:\\"]
     for r in roots:
@@ -82,22 +93,31 @@ def probe_media(path: str, cfg: Optional[dict] = None) -> Dict[str, Any]:
     """读取时长 / 分辨率等基本信息，失败时返回空字段（不抛异常）。"""
     info: Dict[str, Any] = {"duration": 0.0, "width": None, "height": None}
     ffmpeg, ffprobe = find_ffmpeg(cfg)
-    if not ffprobe:
-        return info
-    code, out = _run([ffprobe, "-v", "error", "-show_entries",
-                      "format=duration:stream=width,height,codec_type",
-                      "-of", "json", path], timeout=60)
-    if code != 0:
-        return info
-    try:
-        d = json.loads(out)
-        info["duration"] = float((d.get("format") or {}).get("duration") or 0)
-        for s in d.get("streams") or []:
-            if s.get("codec_type") == "video" and s.get("width"):
-                info["width"], info["height"] = s.get("width"), s.get("height")
-                break
-    except Exception:
-        pass
+    if ffprobe:
+        code, out = _run([ffprobe, "-v", "error", "-show_entries",
+                          "format=duration:stream=width,height,codec_type",
+                          "-of", "json", path], timeout=60)
+        if code == 0:
+            try:
+                d = json.loads(out)
+                info["duration"] = float((d.get("format") or {}).get("duration") or 0)
+                for s in d.get("streams") or []:
+                    if s.get("codec_type") == "video" and s.get("width"):
+                        info["width"], info["height"] = s.get("width"), s.get("height")
+                        break
+            except Exception:
+                pass
+    if not info["duration"] and ffmpeg:
+        # 只有 ffmpeg 没有 ffprobe 时，从 stderr 的 "Duration: 00:03:21.34" 兜底解析
+        code, out = _run([ffmpeg, "-hide_banner", "-i", path], timeout=60)
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out or "")
+        if m:
+            info["duration"] = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                                + float(m.group(3)))
+        if not info.get("width"):
+            m2 = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", out or "")
+            if m2:
+                info["width"], info["height"] = int(m2.group(1)), int(m2.group(2))
     return info
 
 
@@ -156,31 +176,106 @@ def _asr_http(wav: str, cfg: dict) -> Tuple[List[Dict], str]:
     fields = {"model": str(cfg.get("asr_model") or "whisper-1"), "language": "zh",
               "response_format": "verbose_json"}
     key = str(cfg.get("asr_key") or "").strip()
-    d = _post_multipart(url, wav, fields, {"Authorization": f"Bearer {key}"} if key else {})
-    segs = d.get("segments")
-    if isinstance(segs, list) and segs:
-        return ([{"start": float(s.get("start") or 0), "end": float(s.get("end") or 0),
-                  "text": str(s.get("text") or "").strip()} for s in segs], "接口转写")
-    text = str(d.get("text") or "").strip()
-    if not text:
-        raise RuntimeError("接口未返回文本")
-    return _split_text(text), "接口转写"
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+    segs: List[Dict] = []
+    label = "接口转写"
+    for part, offset in _split_wav(wav, cfg):
+        d = _post_multipart(url, part, fields, headers)
+        chunk = d.get("segments")
+        if isinstance(chunk, list) and chunk:
+            segs += [{"start": float(s.get("start") or 0) + offset,
+                      "end": float(s.get("end") or 0) + offset,
+                      "text": str(s.get("text") or "").strip()} for s in chunk]
+            continue
+        text = str(d.get("text") or "").strip()
+        if not text:
+            if len(segs):
+                continue
+            raise RuntimeError("接口未返回文本")
+        for s in _split_text(text):
+            s["start"] += offset
+            s["end"] += offset
+            segs.append(s)
+    return segs, label
+
+
+def _wav_duration(path: str) -> float:
+    """用标准库读 wav 时长，不依赖 ffprobe。"""
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            rate = w.getframerate() or 1
+            return w.getnframes() / float(rate)
+    except Exception:
+        return 0.0
+
+
+ASR_PART_SECONDS = 600          # 单次送转写的最长音频（10 分钟）
+ASR_PART_BYTES = 20 * 1024 * 1024
+
+
+def _split_wav(wav: str, cfg: Optional[dict] = None) -> List[Tuple[str, float]]:
+    """把过长的音轨切成若干段，返回 [(文件, 起始秒)]。
+
+    语音识别接口普遍有 25MB 上限，一段两小时的会议录音直接上传必定失败；
+    本机 whisper 也倾向于在长音频上超时。切开之后逐段转写、再把时间戳偏移回去。
+    """
+    try:
+        size = os.path.getsize(wav)
+    except Exception:
+        return [(wav, 0.0)]
+    dur = _wav_duration(wav)
+    if size <= ASR_PART_BYTES and dur <= ASR_PART_SECONDS:
+        return [(wav, 0.0)]
+    ffmpeg, _ = find_ffmpeg(cfg)
+    if not ffmpeg or dur <= 0:
+        return [(wav, 0.0)]
+    out: List[Tuple[str, float]] = []
+    d = os.path.dirname(wav)
+    n = int(dur // ASR_PART_SECONDS) + 1
+    for i in range(n):
+        start = i * ASR_PART_SECONDS
+        if start >= dur:
+            break
+        seg = os.path.join(d, f"part_{i:03d}.wav")
+        code, _o = _run([ffmpeg, "-y", "-ss", str(start), "-t", str(ASR_PART_SECONDS),
+                         "-i", wav, "-c", "copy", seg], timeout=600)
+        if os.path.isfile(seg) and os.path.getsize(seg) > 1024:
+            out.append((seg, float(start)))
+    return out or [(wav, 0.0)]
+
+
+_WHISPER_CACHE: Dict[str, Any] = {}
+
+
+def _local_model(name: str):
+    """加载（并缓存）本机 whisper 模型。
+
+    模型加载要几秒到几十秒，旧版每次导入音频都重新加载一遍，
+    连续处理几段语音时这部分开销比转写本身还大。
+    """
+    m = _WHISPER_CACHE.get(name)
+    if m is None:
+        from faster_whisper import WhisperModel  # 可选依赖
+        m = WhisperModel(name, device="cpu", compute_type="int8")
+        _WHISPER_CACHE[name] = m
+    return m
 
 
 def _asr_local(wav: str, cfg: dict, on_progress=None) -> Tuple[List[Dict], str]:
-    from faster_whisper import WhisperModel  # 可选依赖
-
     model_name = str(cfg.get("asr_local_model") or "small")
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    it, info = model.transcribe(wav, language="zh", vad_filter=True, beam_size=1)
+    model = _local_model(model_name)
+    total_dur = _wav_duration(wav) or 0
     segs = []
-    total = 0.0
-    for i, s in enumerate(it):
+    for i, s in enumerate(model.transcribe(wav, language="zh", vad_filter=True,
+                                           beam_size=1)[0]):
         segs.append({"start": float(s.start), "end": float(s.end),
                      "text": (s.text or "").strip()})
-        total = float(s.end)
         if on_progress and i % 5 == 0:
-            on_progress(f"正在转写语音… 已到 {_ts(total)}", 0.3)
+            # 按「已转写到音频的第几秒」估算百分比，比「已出 37 句」直观得多
+            pct = 0.3 + 0.4 * min(1.0, (float(s.end) / total_dur) if total_dur else 0)
+            on_progress(f"正在转写语音… 已到 {_ts(float(s.end))}", pct)
     return segs, f"本机 faster-whisper（{model_name}）"
 
 
@@ -225,6 +320,32 @@ def transcribe(wav: str, cfg: dict, on_progress=None) -> Tuple[List[Dict], str, 
     return segs, label, ""
 
 
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return (0x4E00 <= o <= 0x9FFF) or (0x3400 <= o <= 0x4DBF) \
+        or (0x3000 <= o <= 0x303F) or (0xFF00 <= o <= 0xFFEF)
+
+
+def _join_parts(parts: List[str]) -> str:
+    """把转写片段拼成一段话。
+
+    旧版一律用空格连接，于是中文笔记里出现「今天 我们 学习 了 ZBrush」，
+    审查模型会把这种断字当成病句去改。中文之间直接连，英文之间才补空格。
+    """
+    out = ""
+    for p in parts:
+        p = (p or "").strip()
+        if not p:
+            continue
+        if not out:
+            out = p
+        elif _is_cjk(out[-1]) or _is_cjk(p[0]):
+            out += p
+        else:
+            out += " " + p
+    return out
+
+
 def _pack_segments(segs: List[Dict], budget: int = 320) -> List[Tuple[float, str]]:
     """把逐句分段合并成适合阅读/审查的段落，保留段首时间戳。"""
     out: List[Tuple[float, str]] = []
@@ -235,10 +356,10 @@ def _pack_segments(segs: List[Dict], budget: int = 320) -> List[Tuple[float, str
             t0 = float(s.get("start") or 0)
         cur.append(str(s.get("text") or "").strip())
         if sum(len(x) for x in cur) >= budget:
-            out.append((t0, " ".join(x for x in cur if x)))
+            out.append((t0, _join_parts(cur)))
             cur, t0 = [], None
     if cur:
-        out.append((t0 or 0.0, " ".join(x for x in cur if x)))
+        out.append((t0 or 0.0, _join_parts(cur)))
     return out
 
 
@@ -287,24 +408,56 @@ def _save_image(store: ImageStore, path: str, idx: int) -> Optional[Dict[str, An
 
 # ---------------------------------------------------------------- 视频抽帧
 def _extract_frames(video: str, outdir: str, count: int, duration: float,
-                    cfg: Optional[dict] = None) -> List[Tuple[str, float]]:
+                    cfg: Optional[dict] = None) -> Tuple[List[Tuple[str, float]], str]:
+    """抽关键帧。优先按「画面变化」抽，抽不到再退回等间隔抽。
+
+    等间隔抽帧的问题是：讲同一张 PPT 的十分钟里抽到的全是同一页，
+    而真正换页的那一瞬间反而被跳过。先按场景变化抽更贴合「关键帧」的本意。
+    """
     ffmpeg, _ = find_ffmpeg(cfg)
-    if not ffmpeg or count <= 0:
-        return []
+    if not ffmpeg:
+        return [], "未找到 ffmpeg，无法抽取视频关键帧"
+    if count <= 0:
+        return [], ""
+    scale = "scale='min(1280,iw)':-2"
+
+    def _collect(pattern_name: str) -> List[Tuple[str, float]]:
+        got = []
+        for i in range(1, count + 1):
+            p = os.path.join(outdir, pattern_name.format(i=i))
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                got.append(p)
+        return got
+
+    # ① 场景变化优先
+    pattern = os.path.join(outdir, "scene_%03d.jpg")
+    code, out = _run([ffmpeg, "-y", "-i", video, "-vf",
+                      f"select='gt(scene,0.28)',{scale}",
+                      "-vsync", "vfr", "-frames:v", str(count), "-q:v", "3", pattern],
+                     timeout=1200)
+    files = _collect("scene_{i:03d}.jpg")
     interval = max(1.0, (duration or 0) / max(1, count)) if duration else 10.0
-    pattern = os.path.join(outdir, "frame_%03d.jpg")
-    cmd = [ffmpeg, "-y", "-i", video, "-vf",
-           f"fps=1/{interval:.3f},scale='min(1280,iw)':-2",
-           "-frames:v", str(count), "-q:v", "3", pattern]
-    code, out = _run(cmd, timeout=1200)
-    frames = []
-    for i in range(1, count + 1):
-        p = os.path.join(outdir, f"frame_{i:03d}.jpg")
-        if os.path.isfile(p) and os.path.getsize(p) > 0:
-            frames.append((p, interval * (i - 1)))
-    if not frames and code != 0:
-        return []
-    return frames
+    if files:
+        step = (duration or 0) / max(1, len(files))
+        return [(f, round(i * step, 2)) for i, f in enumerate(files)], ""
+
+    # ② 等间隔兜底
+    pattern2 = os.path.join(outdir, "frame_%03d.jpg")
+    code2, out2 = _run([ffmpeg, "-y", "-i", video, "-vf",
+                        f"fps=1/{interval:.3f},{scale}",
+                        "-frames:v", str(count), "-q:v", "3", pattern2],
+                       timeout=1200)
+    files2 = _collect("frame_{i:03d}.jpg")
+    if files2:
+        return [(p, round(interval * i, 2)) for i, p in enumerate(files2)], ""
+
+    tail = (out2 or out or "").strip().splitlines()
+    reason = tail[-1][:160] if tail else "未知原因"
+    if "Invalid data" in (out2 + out) or "moov atom not found" in (out2 + out):
+        reason = "视频文件损坏或不完整（moov atom 缺失），请重新导出后再试"
+    elif "No such file" in (out2 + out):
+        reason = "找不到视频文件"
+    return [], f"未能提取关键帧：{reason}"
 
 
 def _extract_audio(media_path: str, outdir: str, cfg: Optional[dict] = None) -> Optional[str]:
@@ -355,6 +508,10 @@ def parse_media(path: str, store: ImageStore, llm, cfg: Optional[dict] = None,
          + (f"时长 {_ts(dur)}　" if dur else "")
          + (f"{info['width']}×{info['height']}　" if info.get("width") else "")
          + f"格式 {ext.upper() or '未知'}")}]))
+    if dur > 2 * 3600:
+        blocks.append(new_block("para", segs=[{"t": "text", "v":
+            f"提示：这段素材长达 {_ts(dur)}，转写与审查会花较长时间；"
+            "如果只关心其中某一段，建议先剪出来再导入。"}]))
 
     tmp = tempfile.mkdtemp(prefix="nr_media_")
     try:
@@ -397,10 +554,11 @@ def parse_media(path: str, store: ImageStore, llm, cfg: Optional[dict] = None,
             workdir = os.path.join(tmp, "frames")
             os.makedirs(workdir, exist_ok=True)
             prog("正在提取视频关键帧…", 0.5)
-            frames = _extract_frames(path, workdir, want, dur, cfg)
+            frames, frame_err = _extract_frames(path, workdir, want, dur, cfg)
             if not frames:
                 blocks.append(new_block("para", segs=[{"t": "text", "v":
-                    "未能提取关键帧（可能缺少 ffmpeg 或该编码不受支持）。"}]))
+                    frame_err or "未能提取关键帧（可能缺少 ffmpeg 或该编码不受支持）。"}]))
+                meta["frame_error"] = frame_err
             else:
                 blocks.append(new_block("heading", level=2, segs=[{"t": "text",
                                                                    "v": f"关键帧（{len(frames)} 张）"}]))
@@ -471,6 +629,66 @@ def _parse_image(path: str, store: ImageStore, llm, title: str,
         blocks.append(new_block("para", segs=[{"t": "text", "v":
             f"未启用视觉识别（{meta['reason']}），图片内容需人工补充说明。"}]))
     return {"title": title, "blocks": blocks, "source_type": "image", "media": meta}
+
+
+def parse_many_images(paths: List[str], store: ImageStore, llm, title: str = "",
+                      on_progress=None) -> Dict[str, Any]:
+    """一次导入多张图片，合成一篇「图片笔记」。
+
+    很多人把截图当笔记（界面步骤、板书、参考图）。旧版一次只能导一张，
+    十张截图就要操作十次，而且彼此毫无关联。
+    """
+    from .pipeline import _vision_payload
+    blocks: List[Dict[str, Any]] = [
+        new_block("heading", level=1, segs=[{"t": "text",
+                                            "v": f"图片笔记：{title or '未命名'}"}]),
+    ]
+    meta: Dict[str, Any] = {"kind": "image", "count": len(paths), "asr_ok": False,
+                            "vision_ok": False, "reason": "", "chars": 0, "images": 0}
+    vision_ok = bool(llm.supports_vision())
+    if not vision_ok:
+        meta["reason"] = (llm.vision_status() or {}).get("reason") or "未启用视觉识别"
+
+    for i, p in enumerate(paths):
+        if on_progress:
+            on_progress(f"正在处理第 {i + 1}/{len(paths)} 张图片…",
+                        0.05 + 0.9 * (i / max(1, len(paths))))
+        seg = _save_image(store, p, i + 1)
+        if not seg:
+            continue
+        meta["images"] += 1
+        blocks.append(new_block("heading", level=2,
+                                segs=[{"t": "text", "v": f"图 {i + 1}"}]))
+        blocks.append(new_block("para", segs=[seg]))
+        if not vision_ok:
+            continue
+        try:
+            with open(p, "rb") as f:
+                b64, mime = _vision_payload(f.read(),
+                                            os.path.splitext(p)[1].lstrip("."))
+            kind, caption, ocr = _describe_image(
+                llm, b64, mime, f"这是第 {i + 1} 张图片，文件名 {os.path.basename(p)}")
+        except Exception:
+            continue
+        if caption:
+            seg["pre_caption"] = caption
+            seg["pre_kind"] = kind or "图片"
+            meta["vision_ok"] = True
+            blocks.append(new_block("para", segs=[{"t": "text",
+                                                  "v": f"说明：{caption}"
+                                                       + (f"［{kind}］" if kind else "")}]))
+        if ocr:
+            blocks.append(new_block("para", segs=[{"t": "text", "v": f"图中文字：{ocr}"}]))
+            meta["chars"] += len(ocr)
+
+    if not vision_ok:
+        blocks.append(new_block("para", segs=[{"t": "text", "v":
+            f"未启用视觉识别（{meta['reason']}），以上图片只保留画面，"
+            "内容需人工补充说明。"}]))
+    if meta["images"] == 0:
+        meta["reason"] = "所有图片都读取失败"
+    return {"title": title or "图片笔记", "blocks": blocks,
+            "source_type": "image", "media": meta}
 
 
 def capabilities(cfg: Optional[dict] = None, llm=None) -> Dict[str, Any]:

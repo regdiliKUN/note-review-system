@@ -1871,5 +1871,121 @@ class TestHistoryAdvanced(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 多媒体
+class TestMedia(unittest.TestCase):
+    def test_join_parts_chinese_no_space(self):
+        from backend import media
+        self.assertEqual(media._join_parts(["今天", "我们学习", "ZBrush。"]),
+                         "今天我们学习ZBrush。")
+
+    def test_join_parts_english_keeps_space(self):
+        from backend import media
+        self.assertEqual(media._join_parts(["hello", "world"]), "hello world")
+
+    def test_join_parts_mixed(self):
+        from backend import media
+        self.assertEqual(media._join_parts(["用 ZBrush", "雕刻"]), "用 ZBrush雕刻")
+
+    def test_pack_segments_chinese(self):
+        from backend import media
+        segs = [{"start": 0, "end": 2, "text": "第一句。"},
+                {"start": 2, "end": 4, "text": "第二句。"}]
+        out = media._pack_segments(segs)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][1], "第一句。第二句。")
+        self.assertNotIn(" ", out[0][1])
+
+    def test_wav_duration_reads_header(self):
+        import wave
+        from backend import media
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "a.wav")
+            with wave.open(p, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"\x00\x00" * 16000)     # 1 秒
+            self.assertAlmostEqual(media._wav_duration(p), 1.0, places=2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_split_wav_short_returns_single(self):
+        import wave
+        from backend import media
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "a.wav")
+            with wave.open(p, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"\x00\x00" * 1600)
+            parts = media._split_wav(p, {})
+            self.assertEqual(len(parts), 1)
+            self.assertEqual(parts[0][1], 0.0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_asr_status_reports_reason(self):
+        from backend import media
+        st = media.asr_status({})
+        self.assertIn("detail", st)
+        self.assertIsInstance(st["ok"], bool)
+
+    def test_extract_frames_without_ffmpeg(self):
+        from backend import media
+        frames, err = media._extract_frames("x.mp4", tempfile.gettempdir(), 5, 10,
+                                            {"ffmpeg_path": ""})
+        # 机器上可能装了 ffmpeg，因此只断言「要么有帧、要么有明确原因」
+        self.assertTrue(frames or err)
+
+    def test_multi_image_import(self):
+        from backend.api import Api
+        from PIL import Image
+        tmp = tempfile.mkdtemp(prefix="nr_img_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            paths = []
+            for i in range(3):
+                p = os.path.join(tmp, f"截图{i}.png")
+                Image.new("RGB", (40, 30), (i * 40, 80, 120)).save(p)
+                paths.append(p)
+            r = api.load_images(paths)
+            self.assertTrue(r["ok"], r.get("error"))
+            self.assertEqual(r["doc"]["images"], 3)
+            self.assertEqual(r["doc"]["source_type"], "image")
+            heads = [b for b in api.doc["blocks"] if b["kind"] == "heading"]
+            self.assertGreaterEqual(len(heads), 4, "总标题 + 每张图一个小标题")
+
+            bad = api.load_images([os.path.join(tmp, "x.txt")])
+            self.assertFalse(bad["ok"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_multi_image_dedup_same_content(self):
+        from backend.api import Api
+        from PIL import Image
+        tmp = tempfile.mkdtemp(prefix="nr_img2_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            paths = []
+            for i in range(2):
+                p = os.path.join(tmp, f"same{i}.png")
+                Image.new("RGB", (20, 20), (9, 9, 9)).save(p)
+                paths.append(p)
+            r = api.load_images(paths)
+            self.assertTrue(r["ok"])
+            files = [s["file"] for b in api.doc["blocks"] for s in b["segs"] if s["t"] == "img"]
+            self.assertEqual(len(files), 2)
+            self.assertEqual(len(set(files)), 1, "内容相同的图片只落一份文件")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

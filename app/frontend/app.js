@@ -377,6 +377,7 @@ function updateHistBar(r) {
 function wire() {
   $('#btnImport').onclick = doImport;
   $('#btnImport2').onclick = doImport;
+  $('#btnImportImages').onclick = doImportImages;
   $('#btnReview').onclick = doReview;
 
   $$('#viewTabs .tab').forEach(t => t.onclick = () => switchView(t.dataset.view));
@@ -759,9 +760,16 @@ function openLightbox(src, cap) {
 
 /* ────────────────────────────── 导入 ────────────────────────────── */
 async function doImport() {
-  if (S.busy) return;
+  if (S.busy) return toast('正在审查中，请稍候', 'err');
   const r = await window.pywebview.api.choose_file();
   handlePayload(r);
+}
+
+async function doImportImages() {
+  if (S.busy) return toast('正在审查中，请稍候', 'err');
+  const r = await window.pywebview.api.choose_images();
+  handlePayload(r);
+  if (r && r.ok && r.imageCount) toast(`已导入 ${r.imageCount} 张图片，合成一篇图片笔记`, 'ok');
 }
 
 function handlePayload(r) {
