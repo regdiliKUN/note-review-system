@@ -35,6 +35,14 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
+# ---- 开发期临时产物（脚本保留，生成物不入库）----
+app/build/shots/
+app/build/*.png
+app/build/*.docx
+app/build/*.html
+app/build/*.md
+app/build/payload.json
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
