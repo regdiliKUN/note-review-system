@@ -1987,5 +1987,65 @@ class TestMedia(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 批注编辑与预估
+class TestEditAndEstimate(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_edit_")
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.src = os.path.join(self.tmp, "n.txt")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("标题\n\n第一句。第二句。\n")
+        self.api.load(self.src)
+        self.api.anns = [{
+            "id": "a1", "block_id": "b1", "op": "replace_sentence", "type": "表达优化",
+            "target": "第一句。", "replacement": "改写句。", "reason": "r",
+            "severity": "low", "status": "accepted", "anchor": [0, 0, 0, 4], "sid": 0}]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_set_replacement(self):
+        r = self.api.set_replacement("a1", "我自己的写法。")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["anns"][0]["replacement"], "我自己的写法。")
+        self.assertTrue(r["anns"][0]["edited"])
+        text = "".join(s["v"] for s in self.api.blocks_current[1]["segs"])
+        self.assertIn("我自己的写法。", text)
+
+    def test_set_replacement_empty_rejected(self):
+        self.assertFalse(self.api.set_replacement("a1", "   ")["ok"])
+
+    def test_set_replacement_missing_ann(self):
+        self.assertFalse(self.api.set_replacement("nope", "x")["ok"])
+
+    def test_set_replacement_on_comment_rejected(self):
+        self.api.anns.append({"id": "c1", "block_id": "b1", "op": "comment",
+                              "type": "结构建议", "target": "", "replacement": "",
+                              "reason": "建议分节", "severity": "low",
+                              "status": "pending", "anchor": None, "sid": None})
+        self.assertFalse(self.api.set_replacement("c1", "x")["ok"])
+
+    def test_estimate_shape(self):
+        r = self.api.estimate_review()
+        self.assertTrue(r["ok"])
+        for k in ("chunks", "chars", "images", "eta"):
+            self.assertIn(k, r)
+        self.assertGreaterEqual(r["chunks"], 1)
+        self.assertGreater(r["eta"], 0)
+
+    def test_estimate_requires_doc(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp()
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            self.assertFalse(api.estimate_review()["ok"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

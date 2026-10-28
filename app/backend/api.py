@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 
-from . import docmodel, history as hist, logs, media, relayout as rl, report as rpt, review
+from . import docmodel, history as hist, logs, media, pipeline, relayout as rl, report as rpt, review
 from .llm import LLM, LLMError
 from .pipeline import analyze_images, review_document, summarize
 
@@ -1031,6 +1031,54 @@ class Api:
             "severity": "low", "status": "pending", "anchor": None, "sid": None,
         })
         return self._payload()
+
+    def set_replacement(self, ann_id: str, text: str) -> dict:
+        """手动微调 AI 给的替换文本。
+
+        AI 的改写方向对、用词不合口味是常事。以前只能整条丢弃再自己改原文，
+        现在可以直接在批注里改掉那几个字。
+        """
+        a = next((x for x in self.anns if x["id"] == ann_id), None)
+        if a is None:
+            return {"ok": False, "error": "这条批注不存在"}
+        if a.get("op") == "comment":
+            return {"ok": False, "error": "「仅提醒」类批注没有替换文本可改"}
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "替换文本不能为空"}
+        if len(text) > 4000:
+            return {"ok": False, "error": "替换文本过长（上限 4000 字）"}
+        if text == (a.get("replacement") or ""):
+            return self._payload()
+        a["replacement"] = text
+        a["edited"] = True
+        self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
+        self._rebuild_relayout()
+        return self._payload(extra={"edited": ann_id})
+
+    def estimate_review(self) -> dict:
+        """审查前预估：会切成几块、大概要跑多久。
+
+        8B 模型审一篇长笔记要十几分钟，用户在按下按钮之前就应该知道
+        自己要等多久，而不是看着进度条猜。
+        """
+        if not self.doc:
+            return {"ok": False, "error": "请先导入笔记"}
+        try:
+            pieces = pipeline._pieces(self.doc["blocks"])
+            chunks = pipeline._chunk_pieces(pieces)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        chars = sum(len(docmodel.block_text_only(b)) for b in self.doc["blocks"]
+                    if b["kind"] != "table")
+        imgs = self._image_count()
+        # 经验值：本机 8B 模型约 25 字/秒，视觉模型每张约 3-6 秒
+        text_sec = max(5, int(chars / 25))
+        img_sec = int(imgs * 4.5) if self._vision_status().get("enabled") else 0
+        return {"ok": True, "chunks": len(chunks), "chars": chars, "images": imgs,
+                "eta": text_sec + img_sec,
+                "vision": bool(self._vision_status().get("enabled")),
+                "model": self.cfg.get("model", "")}
 
     # ------------------------------------------------------------ 取舍
     def set_status(self, ann_id: str, status: str) -> dict:

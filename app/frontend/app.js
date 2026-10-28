@@ -22,6 +22,9 @@ const S = {
   hist: null,
   histKind: null,
   cmp: [],
+  undo: [],
+  ctxBid: null,
+  noteBid: null,
   fontSize: 0,          // -2..+4，作用在 .paper 的字号上
   startedAt: 0,
   lastMsg: '',
@@ -681,11 +684,74 @@ function wire() {
     const id = card.dataset.id;
     if (e.target.dataset.act) {
       const act = e.target.dataset.act;
+      if (act === 'edit') { editAnn(id); return; }
       setStatus(id, act === 'yes' ? 'accepted' : 'rejected');
       return;
     }
     activate(id, false);
   });
+
+  // 段落右键菜单：加批注 / 复制原文 / 只看本段
+  $('#paper').addEventListener('contextmenu', e => {
+    const blk = e.target.closest('.blk');
+    if (!blk || !S.p || !S.p.doc) return;
+    e.preventDefault();
+    S.ctxBid = blk.id;
+    const m = $('#ctxMenu');
+    m.style.left = Math.min(e.clientX, window.innerWidth - 190) + 'px';
+    m.style.top = Math.min(e.clientY, window.innerHeight - 140) + 'px';
+    m.classList.add('on');
+  });
+  document.addEventListener('click', () => $('#ctxMenu').classList.remove('on'));
+  $('#ctxMenu').addEventListener('click', async e => {
+    const b = e.target.closest('[data-ctx]');
+    if (!b) return;
+    $('#ctxMenu').classList.remove('on');
+    const bid = S.ctxBid;
+    const act = b.dataset.ctx;
+    if (act === 'note') return openNoteDialog(bid);
+    if (act === 'copy') {
+      const text = blockPlain(bid);
+      try { await navigator.clipboard.writeText(text); toast('已复制本段原文', 'ok'); }
+      catch (err) { toast('复制失败：' + err, 'err'); }
+      return;
+    }
+    if (act === 'filter') {
+      S.q = '';
+      const anns = S.p.anns.filter(a => a.block_id === bid);
+      if (!anns.length) return toast('这一段还没有批注', '');
+      S.filter = 'all'; S.sev = 'all';
+      S.page = 1;
+      renderAnns();
+      activate(anns[0].id, true);
+      return;
+    }
+    if (act === 'jump') {
+      const anns = S.p.anns.filter(a => a.block_id === bid);
+      if (!anns.length) return toast('这一段还没有批注', '');
+      activate(anns[0].id, false);
+    }
+  });
+
+  // 手写批注
+  const closeNote = () => $('#noteMask').classList.remove('on');
+  $('#btnCloseNote').onclick = closeNote;
+  $('#btnCancelNote').onclick = closeNote;
+  $('#noteMask').onclick = e => { if (e.target.id === 'noteMask') closeNote(); };
+  $$('#noteTypeSeg button').forEach(b => b.onclick = () => {
+    $$('#noteTypeSeg button').forEach(x => x.classList.toggle('active', x === b));
+  });
+  $('#btnSaveNote').onclick = async () => {
+    const text = $('#noteText').value.trim();
+    if (!text) return toast('批注内容不能为空', 'err');
+    const typ = ($('#noteTypeSeg button.active') || {}).dataset?.t || '存疑待核';
+    const r = await window.pywebview.api.add_manual_note(S.noteBid, text, typ);
+    if (r.ok === false) return toast(r.error || '保存失败', 'err');
+    S.p = r;
+    renderAll();
+    closeNote();
+    toast('批注已添加', 'ok');
+  };
 
   // 大纲跳转
   $('#tocList').addEventListener('click', e => {
@@ -712,6 +778,7 @@ function wire() {
     if (e.ctrlKey || e.metaKey) {
       if (e.key === '=' || e.key === '+') { e.preventDefault(); $('#btnFontPlus').click(); return; }
       if (e.key === '-') { e.preventDefault(); $('#btnFontMinus').click(); return; }
+      if (e.key.toLowerCase() === 'z') { e.preventDefault(); undoLast(); return; }
       return;
     }
 
@@ -1127,8 +1194,78 @@ function annCardHtml(a, idxOf) {
       <button class="no ${a.status === 'rejected' ? 'on-no' : ''}" data-act="no">
         ${a.status === 'rejected' ? '✕ 已丢弃' : '丢弃'}
       </button>
+      ${a.op !== 'comment'
+        ? `<button class="mini-ghost" data-act="edit" title="手动微调替换文本">编辑</button>`
+        : ''}
     </div>
   </div>`;
+}
+
+/* 段落纯文本（右键复制用） */
+function tokText(tokens) {
+  return (tokens || []).map(t => (t.k === 'i' ? '［图片］' : (t.v || ''))).join('');
+}
+
+function blockPlain(bid) {
+  const views = (S.p && S.p.views) || {};
+  const view = (views[S.view] && views[S.view].length) ? views[S.view] : views.annotated;
+  const b = (view || []).find(x => x.id === bid);
+  if (!b) return '';
+  if (b.kind === 'table') {
+    return (b.rows || []).map(r => r.map(c => tokText(c.tokens)).join(' | ')).join('\n');
+  }
+  return tokText(b.tokens);
+}
+
+function openNoteDialog(bid) {
+  if (!S.p || !S.p.doc) return toast('请先导入文档', 'err');
+  S.noteBid = bid;
+  $('#noteQuote').textContent = (blockPlain(bid) || '（空段落）').slice(0, 180);
+  $('#noteText').value = '';
+  $('#noteMask').classList.add('on');
+  setTimeout(() => $('#noteText').focus(), 60);
+}
+
+/* 撤销：只回退批注状态，不影响原文 */
+async function undoLast() {
+  const u = (S.undo || []).pop();
+  if (!u) return toast('没有可撤销的操作', '');
+  const r = await window.pywebview.api.set_status(u.id, u.from);
+  if (r && r.ok === false) return toast(r.error || '撤销失败', 'err');
+  S.p = r;
+  renderAll();
+  toast('已撤销上一步', 'ok');
+}
+
+/* 行内编辑替换文本 */
+function editAnn(id) {
+  const card = $(`.ann-card[data-id="${id}"]`);
+  const a = S.p && S.p.anns.find(x => x.id === id);
+  if (!card || !a || a.op === 'comment') return;
+  const diff = card.querySelector('.ac-diff');
+  if (!diff || diff.querySelector('.ann-edit')) return;
+  diff.innerHTML = `<textarea class="ann-edit" rows="3">${esc(a.replacement || '')}</textarea>
+    <div class="ann-edit-btns">
+      <button class="mini-btn ok" data-save="1">保存</button>
+      <button class="mini-btn" data-cancel="1">取消</button>
+    </div>`;
+  const ta = diff.querySelector('textarea');
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  const cancel = () => { S.p = S.p; renderAnns(); };
+  diff.querySelector('[data-cancel]').onclick = cancel;
+  diff.querySelector('[data-save]').onclick = async () => {
+    const r = await window.pywebview.api.set_replacement(id, ta.value);
+    if (r.ok === false) return toast(r.error || '保存失败', 'err');
+    S.p = r;
+    renderAll();
+    toast('替换文本已更新', 'ok');
+  };
+  ta.onkeydown = e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) diff.querySelector('[data-save]').click();
+    if (e.key === 'Escape') cancel();
+    e.stopPropagation();
+  };
 }
 
 /* ────────────────────────────── 交互 ────────────────────────────── */
@@ -1179,8 +1316,14 @@ function highlightBlockAnns(bid) {
 
 async function setStatus(id, status) {
   if (S.busy) return;
+  const before = ((S.p && S.p.anns.find(x => x.id === id)) || {}).status;
   const r = await window.pywebview.api.set_status(id, status);
+  if (r && r.ok === false) return toast(r.error || '操作失败', 'err');
   S.p = r;
+  if (before && before !== status) {
+    S.undo.push({ id, from: before });
+    if (S.undo.length > 60) S.undo.shift();
+  }
   renderAll();
   const a = r.anns.find(x => x.id === id);
   if (a) {
@@ -1192,10 +1335,13 @@ async function setStatus(id, status) {
 async function bulk(action) {
   if (!S.p || !S.p.doc) return toast('请先导入文档', 'err');
   if (!S.p.anns.length) return toast('还没有批注', 'err');
-  const r = await window.pywebview.api.bulk(action, 'all');
+  const scope = ($('#bulkScope') && $('#bulkScope').value) || 'all';
+  const r = await window.pywebview.api.bulk(action, scope);
+  if (r && r.ok === false) return toast(r.error || '操作失败', 'err');
   S.p = r;
   renderAll();
-  toast(action === 'accept' ? '已全部保留' : '已全部撤销',
+  const n = r.affected || 0;
+  toast(`${scope === 'all' ? '全部' : scope} · ${action === 'accept' ? '已保留' : '已撤销'} ${n} 条`,
     action === 'accept' ? 'ok' : '');
 }
 
@@ -1243,6 +1389,14 @@ async function doReview() {
   $('#progressTxt').textContent = '准备中…';
   S.lastMsg = '准备中';
   startTicker();
+  // 先估个时长，让用户在等之前就有心理预期
+  try {
+    const est = await window.pywebview.api.estimate_review();
+    if (est && est.ok) {
+      S.lastMsg = `共 ${est.chunks} 段 / ${est.chars} 字，预计约 ${fmtDur(est.eta)}`;
+      $('#progressTxt').textContent = S.lastMsg;
+    }
+  } catch (e) { /* 估算失败不影响主流程 */ }
   try {
     const r = await window.pywebview.api.run_review(true);
     if (r.ok === false) toast(r.error, 'err');

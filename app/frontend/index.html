@@ -184,8 +184,18 @@
           <span class="badge-soft" id="annTotal">0</span>
         </div>
         <div class="rb-actions">
-          <button class="mini-btn ok" id="btnAcceptAll" title="全部保留">全部保留</button>
-          <button class="mini-btn no" id="btnRejectAll" title="全部撤销">全部撤销</button>
+          <select id="bulkScope" class="mini-select" title="批量操作的作用范围">
+            <option value="all">全部类型</option>
+            <option value="错别字">错别字</option>
+            <option value="事实纠错">事实纠错</option>
+            <option value="知识补充">知识补充</option>
+            <option value="表达优化">表达优化</option>
+            <option value="逻辑归纳">逻辑归纳</option>
+            <option value="结构建议">结构建议</option>
+            <option value="存疑待核">存疑待核</option>
+          </select>
+          <button class="mini-btn ok" id="btnAcceptAll" title="按所选范围保留">保留</button>
+          <button class="mini-btn no" id="btnRejectAll" title="按所选范围撤销">撤销</button>
         </div>
       </div>
       <div class="rb-tools">
@@ -412,6 +422,49 @@
   </div>
 </div>
 
+<!-- 段落右键菜单 -->
+<div class="ctx-menu" id="ctxMenu">
+  <button data-ctx="note">在此段加批注…</button>
+  <button data-ctx="copy">复制本段原文</button>
+  <button data-ctx="filter">只看本段的批注</button>
+  <button data-ctx="jump">跳到该段对应批注</button>
+</div>
+
+<!-- 手写批注 -->
+<div class="modal-mask" id="noteMask">
+  <div class="modal modal-narrow">
+    <div class="modal-head">
+      <h3>添加批注</h3>
+      <button class="icon-btn" id="btnCloseNote">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>针对的段落</label>
+        <div class="note-quote" id="noteQuote"></div>
+      </div>
+      <div class="field">
+        <label>类型</label>
+        <div class="seg" id="noteTypeSeg">
+          <button data-t="错别字">错别字</button>
+          <button data-t="事实纠错">事实纠错</button>
+          <button data-t="知识补充">知识补充</button>
+          <button data-t="表达优化">表达优化</button>
+          <button data-t="存疑待核" class="active">存疑待核</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>批注内容</label>
+        <textarea id="noteText" rows="4" placeholder="例如：这里的年份和上下文对不上，需要核对原始资料。"></textarea>
+        <div class="hint">手写批注会和 AI 批注一起出现在右栏，同样可以「保留 / 丢弃」，也会进入审阅报告。</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="btnCancelNote">取消</button>
+      <button class="btn btn-primary" id="btnSaveNote">保存批注</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast-wrap" id="toastWrap"></div>
 
 <!-- 图片灯箱 -->
@@ -437,9 +490,11 @@
         <span>保留当前批注</span><kbd>A</kbd>
         <span>丢弃当前批注</span><kbd>R</kbd>
         <span>聚焦搜索框</span><kbd>/</kbd>
+        <span>撤销上一步批注操作</span><kbd>Ctrl</kbd><kbd>Z</kbd>
         <span>放大 / 缩小正文字号</span><kbd>Ctrl</kbd><kbd>+</kbd><kbd>−</kbd>
         <span>关闭弹层 / 灯箱</span><kbd>Esc</kbd>
         <span>打开本面板</span><kbd>?</kbd>
+        <span>段落右键菜单（加批注 / 复制原文）</span><kbd>右键</kbd>
       </div>
       <div class="hint" style="margin-top:12px">
         提示：批注卡片上的「保留 / 丢弃」可以直接点，也可以先用 J/K 选中再用 A/R 决定，
