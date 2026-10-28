@@ -373,6 +373,101 @@ class TestRelayout(unittest.TestCase):
         self.assertEqual(r["blocks"][0]["segs"][0]["t"], "img")
 
 
+class TestRelayoutAdvanced(unittest.TestCase):
+    def test_number_style_arabic(self):
+        r = relayout.relayout(index([heading("甲"), heading("乙")]),
+                              {"number_style": "arabic"})
+        self.assertEqual(r["toc"][0]["no"], "1. ")
+        self.assertEqual(r["toc"][1]["no"], "2. ")
+
+    def test_number_style_chapter(self):
+        r = relayout.relayout(index([heading("甲")]), {"number_style": "chapter"})
+        self.assertEqual(r["toc"][0]["no"], "第一章 ")
+
+    def test_number_style_cn_paren(self):
+        r = relayout.relayout(index([heading("甲")]), {"number_style": "cn_paren"})
+        self.assertEqual(r["toc"][0]["no"], "（一）")
+
+    def test_strip_circled_number(self):
+        r = relayout.relayout(index([heading("① 绪论")]), {"number_headings": True})
+        text = "".join(s["v"] for s in r["blocks"][0]["segs"])
+        self.assertEqual(text.strip(), "绪论")
+
+    def test_strip_dotted_number(self):
+        r = relayout.relayout(index([heading("3.1.2 方法")]), {"number_headings": True})
+        text = "".join(s["v"] for s in r["blocks"][0]["segs"])
+        self.assertEqual(text.strip(), "方法")
+
+    def test_dedup_adjacent_headings(self):
+        blocks = index([heading("一、笔刷"), heading("笔刷"), para(txt("正文。"))])
+        r = relayout.relayout(blocks, {"dedup_headings": True})
+        self.assertEqual(r["stats"]["dedup_headings"], 1)
+        self.assertEqual(sum(1 for b in r["blocks"] if b["kind"] == "heading"), 1)
+
+    def test_keep_separated_duplicate_headings(self):
+        blocks = index([heading("甲"), para(txt("正文。")), heading("甲")])
+        r = relayout.relayout(blocks, {"dedup_headings": True})
+        self.assertEqual(r["stats"]["dedup_headings"], 0)
+
+    def test_drop_empty_blocks(self):
+        blocks = index([para(txt("  ")), para(txt("有内容。")), para(txt("\n"))])
+        r = relayout.relayout(blocks, {"drop_empty": True})
+        self.assertEqual(len(r["blocks"]), 1)
+        self.assertEqual(r["stats"]["dropped_empty"], 2)
+
+    def test_empty_block_with_image_kept(self):
+        blocks = index([para(img("a.png")), para(txt(""))])
+        r = relayout.relayout(blocks, {"drop_empty": True})
+        self.assertEqual(len(r["blocks"]), 1)
+        self.assertEqual(r["blocks"][0]["segs"][0]["t"], "img")
+
+    def test_normalize_list_markers(self):
+        blocks = index([{"id": "b0", "kind": "list", "level": 0,
+                         "segs": [txt("- 第一条")], "style": {}},
+                        {"id": "b1", "kind": "list", "level": 0,
+                         "segs": [txt("1. 第二条")], "style": {}}])
+        r = relayout.relayout(blocks, {"normalize_list": True})
+        self.assertTrue(r["blocks"][0]["segs"][0]["v"].startswith("· 第一条"))
+        self.assertTrue(r["blocks"][1]["segs"][0]["v"].startswith("1. 第二条"),
+                        "数字序号不能被改成圆点")
+
+    def test_split_long_paragraph(self):
+        body = "".join(f"这是第{i}句话，用来把段落撑长。" for i in range(120))
+        blocks = index([para(txt(body))])
+        r = relayout.relayout(blocks, {"split_long_paras": True})
+        self.assertGreater(len(r["blocks"]), 1)
+        self.assertGreater(r["stats"]["split_paras"], 0)
+        joined = "".join("".join(s["v"] for s in b["segs"]) for b in r["blocks"])
+        self.assertEqual(joined.replace(" ", ""), body.replace(" ", ""),
+                         "拆段不能丢字")
+
+    def test_split_ids_unique(self):
+        body = "".join(f"句子{i}。" for i in range(400))
+        blocks = index([para(txt(body))])
+        r = relayout.relayout(blocks, {"split_long_paras": True})
+        ids = [b["id"] for b in r["blocks"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_no_split_when_image_present(self):
+        body = "".join(f"句子{i}。" for i in range(400))
+        blocks = index([para(txt(body), img(), txt("尾巴。"))])
+        r = relayout.relayout(blocks, {"split_long_paras": True})
+        self.assertEqual(len(r["blocks"]), 1)
+        self.assertEqual(sum(1 for s in r["blocks"][0]["segs"] if s["t"] == "img"), 1)
+
+    def test_ensure_headings_promotes_several(self):
+        blocks = index([para(txt("第一节")), para(txt("正文内容在这里。")),
+                        para(txt("第二节")), para(txt("更多正文。"))])
+        r = relayout.relayout(blocks, {"ensure_heading": True})
+        self.assertEqual(r["stats"]["promoted"], 2)
+
+    def test_stats_reported(self):
+        r = relayout.relayout(index([heading("甲"), para(txt("a\nb"))]), {})
+        for k in ("merged_lines", "split_paras", "dropped_empty",
+                  "dedup_headings", "promoted", "renumbered"):
+            self.assertIn(k, r["stats"])
+
+
 # ══════════════════════════════════════════════════════ 历史
 class TestHistory(unittest.TestCase):
     def setUp(self):

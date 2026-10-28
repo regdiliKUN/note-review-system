@@ -18,6 +18,13 @@ DOC_EXT = (".docx", ".doc", ".txt", ".md", ".markdown", ".text")
 MEDIA_SUFFIX = tuple("." + e for e in sorted(media.MEDIA_EXT))
 SUPPORTED = DOC_EXT + MEDIA_SUFFIX
 
+RELAYOUT_DEFAULTS = {
+    "add_toc": True, "number_headings": True, "merge_lines": True,
+    "normalize_text": True, "add_summary": True, "ensure_heading": True,
+    "normalize_list": True, "drop_empty": True, "dedup_headings": True,
+    "split_long_paras": True, "number_style": "cn",
+}
+
 FILE_TYPES = (
     "笔记与多媒体 (*.docx;*.doc;*.txt;*.md;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;"
     "*.mp4;*.mov;*.mkv;*.avi;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp)",
@@ -97,11 +104,7 @@ class Api:
             "history_keep": 8,
             "review_level": "normal",
             "glossary": [],
-            "relayout": {
-                "add_toc": True, "number_headings": True,
-                "merge_lines": True, "normalize_text": True,
-                "add_summary": True, "ensure_heading": True,
-            },
+            "relayout": dict(RELAYOUT_DEFAULTS),
             "recent": [],
         }
         try:
@@ -110,10 +113,7 @@ class Api:
             if not isinstance(d, dict):
                 raise ValueError("配置文件不是 JSON 对象")
             default.update({k: v for k, v in d.items() if v is not None})
-            default["relayout"] = {**{"add_toc": True, "number_headings": True,
-                                      "merge_lines": True, "normalize_text": True,
-                                      "add_summary": True, "ensure_heading": True},
-                                   **(d.get("relayout") or {})}
+            default["relayout"] = {**RELAYOUT_DEFAULTS, **(d.get("relayout") or {})}
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -747,6 +747,7 @@ class Api:
                 # relaid 里的文字已经是改过的，直接用纯 token 渲染
                 "blocks": self._ser_blocks(self.relaid["blocks"], anns, "original"),
                 "toc": self.relaid.get("toc", []),
+                "stats": self.relaid.get("stats", {}),
                 "summary": self.relaid.get("summary", ""),
                 "key_points": self.relaid.get("key_points", []),
                 "gaps": self.relaid.get("gaps", []),

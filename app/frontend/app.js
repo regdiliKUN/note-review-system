@@ -86,6 +86,8 @@ function fillSettings(boot) {
   $('#fieldKey').style.display = S.provider === 'openai' ? '' : 'none';
   const opts = boot.relayoutOpts || {};
   $$('.checks input').forEach(c => { c.checked = opts[c.dataset.opt] !== false; });
+  S.numberStyle = opts.number_style || 'cn';
+  $$('#styleSeg button').forEach(b => b.classList.toggle('active', b.dataset.s === S.numberStyle));
   $('#modelHint').textContent = S.models.length
     ? '本机可用：' + S.models.join('、')
     : '未检测到 Ollama 模型';
@@ -420,6 +422,10 @@ function wire() {
       }[S.level];
     }
   });
+  $$('#styleSeg button').forEach(b => b.onclick = () => {
+    S.numberStyle = b.dataset.s;
+    $$('#styleSeg button').forEach(x => x.classList.toggle('active', x === b));
+  });
   $('#btnTestConn').onclick = async () => {
     const r = await window.pywebview.api.set_provider(
       S.provider, $('#inpBase').value.trim(), $('#inpKey').value, $('#inpModel').value.trim(),
@@ -457,6 +463,7 @@ function wire() {
     }
     const opts = {};
     $$('.checks input').forEach(c => opts[c.dataset.opt] = c.checked);
+    if (S.numberStyle) opts.number_style = S.numberStyle;
     if (S.p && S.p.doc) {
       const r = await window.pywebview.api.set_relayout(S.relayout, opts);
       handlePayload(r);
@@ -814,6 +821,18 @@ function renderDoc() {
       return;
     }
     let html = '';
+    const rs = rl.stats || {};
+    const rsBits = [
+      rs.merged_lines ? `合并断行 ${rs.merged_lines} 处` : '',
+      rs.split_paras ? `拆分长段 ${rs.split_paras} 处` : '',
+      rs.dropped_empty ? `删除空段 ${rs.dropped_empty} 个` : '',
+      rs.dedup_headings ? `合并重复标题 ${rs.dedup_headings} 个` : '',
+      rs.promoted ? `补齐标题 ${rs.promoted} 个` : '',
+      rs.renumbered ? `编号 ${rs.renumbered} 个标题` : ''
+    ].filter(Boolean);
+    if (rsBits.length) {
+      html += `<div class="rl-stats">本次重排：${esc(rsBits.join('　·　'))}</div>`;
+    }
     if (rl.summary || (rl.key_points && rl.key_points.length)) {
       html += '<div class="rl-summary" style="background:#f7f9fc;border:1px solid #e5e9f0;' +
         'border-radius:9px;padding:18px 22px;margin-bottom:26px">';
