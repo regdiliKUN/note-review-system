@@ -183,7 +183,16 @@ class HistoryStore:
         os.makedirs(d, exist_ok=True)
 
         now = time.time()
-        entry_id = snapshot.get("id") or time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+        entry_id = snapshot.get("id")
+        if not entry_id:
+            # 时间戳精确到秒，同一秒内重复审查会撞 id 把上一条覆盖掉，
+            # 这里补一个序号后缀，确保每次都留下独立快照。
+            base = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+            entry_id = base
+            n = 0
+            while os.path.exists(self.snap_path(path, entry_id)):
+                n += 1
+                entry_id = f"{base}-{n:02d}"
         snapshot = dict(snapshot)
         snapshot.update({
             "schema": SCHEMA,
@@ -236,6 +245,21 @@ class HistoryStore:
 
     # -------------------------------------------------- 汇总
     def summary(self) -> dict:
+        """历史总占用。
+
+        目录里可能有上千个快照文件，boot() 每次都全量 stat 一遍会明显拖慢启动，
+        所以按目录 mtime 做 60 秒缓存；有新写入时 mtime 会变，缓存自动失效。
+        """
+        import time as _t
+        try:
+            stamp = os.path.getmtime(self.root)
+        except Exception:
+            stamp = 0
+        cache = getattr(self, "_sum_cache", None)
+        now = _t.time()
+        if cache and cache[0] == stamp and now - cache[1] < 60:
+            return cache[2]
+
         files = 0
         entries = 0
         size = 0
@@ -257,4 +281,6 @@ class HistoryStore:
                 files += 1 if got else 0
         except Exception:
             pass
-        return {"files": files, "entries": entries, "bytes": size, "root": self.root}
+        result = {"files": files, "entries": entries, "bytes": size, "root": self.root}
+        self._sum_cache = (stamp, now, result)
+        return result

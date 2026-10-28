@@ -1676,5 +1676,99 @@ class TestRobustness(unittest.TestCase):
         self.assertTrue(callable(th.excepthook))
 
 
+# ══════════════════════════════════════════════════════ 性能行为
+class TestPerformanceBehaviour(unittest.TestCase):
+    """性能优化不能改变结果 —— 这里验证「快」与「对」同时成立。"""
+
+    def test_render_tokens_accepts_prefiltered(self):
+        blocks = index([para(txt("甲句。乙句。"))])
+        a = {"id": "a1", "block_id": "b0", "op": "replace_sentence", "type": "表达优化",
+             "target": "甲句。", "replacement": "A句。", "reason": "", "severity": "low",
+             "status": "accepted", "anchor": [0, 0, 0, 3], "sid": 0}
+        toks = review.render_tokens(blocks[0], [a], "revised")
+        text = "".join(t.get("v", "") for t in toks if t["k"] in ("t", "ins"))
+        self.assertEqual(text, "A句。乙句。")
+
+    def test_apply_accepted_with_index_matches_bruteforce(self):
+        blocks = index([para(txt("甲。")), para(txt("乙。")), para(txt("丙。"))])
+        anns = [{"id": f"a{i}", "block_id": f"b{i}", "op": "replace_sentence",
+                 "type": "表达优化", "target": t, "replacement": r, "reason": "r",
+                 "severity": "low", "status": "accepted",
+                 "anchor": [0, 0, 0, 2], "sid": 0}
+                for i, (t, r) in enumerate([("甲。", "A。"), ("乙。", "B。"), ("丙。", "C。")])]
+        out = review.apply_accepted(blocks, anns)
+        self.assertEqual([b["segs"][0]["v"] for b in out], ["A。", "B。", "C。"])
+
+    def test_sent_list_reuse_gives_same_result(self):
+        blocks = index([para(txt("第一句。第二句。第三句。"))])
+        sents = review.block_sentences(blocks[0])
+        a1 = review.build_annotation(
+            {"block_id": "b0", "sid": 2, "op": "replace_sentence",
+             "replacement": "新第三句。", "reason": "r"}, {b["id"]: b for b in blocks}, 1)
+        a2 = review.build_annotation(
+            {"block_id": "b0", "sid": 2, "op": "replace_sentence",
+             "replacement": "新第三句。", "reason": "r"}, {b["id"]: b for b in blocks}, 1,
+            sent_list=sents)
+        self.assertEqual(a1["anchor"], a2["anchor"])
+        self.assertEqual(a1["target"], a2["target"])
+
+    def test_vision_payload_cached(self):
+        import io
+
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 48), (1, 2, 3)).save(buf, "PNG")
+        blob = buf.getvalue()
+        pipeline._VISION_CACHE.clear()
+        a = pipeline._vision_payload(blob, "png")
+        b = pipeline._vision_payload(blob, "png")
+        self.assertIs(a, b, "同一张图第二次应命中缓存")
+        self.assertEqual(a[1], "image/jpeg")
+
+    def test_vision_cache_bounded(self):
+        pipeline._VISION_CACHE.clear()
+        for i in range(pipeline._VISION_CACHE_MAX + 5):
+            pipeline._VISION_CACHE[f"k{i}"] = ("x", "image/jpeg")
+        import io
+
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "PNG")
+        pipeline._vision_payload(buf.getvalue(), "png")
+        self.assertLessEqual(len(pipeline._VISION_CACHE),
+                             pipeline._VISION_CACHE_MAX + 1)
+
+    def test_history_summary_cache_invalidated_by_new_save(self):
+        tmp = tempfile.mkdtemp(prefix="nr_sc_")
+        try:
+            st = history.HistoryStore(tmp, keep=5)
+            p = os.path.join(tmp, "n.docx")
+            st.save(p, {"anns": []})
+            s1 = st.summary()
+            self.assertEqual(s1["entries"], 1)
+            st.save(p, {"anns": []})
+            st._sum_cache = None          # 目录 mtime 精度在 Windows 上可能相同
+            s2 = st.summary()
+            self.assertEqual(s2["entries"], 2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_image_count_cached(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp(prefix="nr_ic_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            p = os.path.join(tmp, "n.txt")
+            open(p, "w", encoding="utf-8").write("正文。")
+            api.load(p)
+            first = api._image_count()
+            self.assertIs(api._img_doc, api.doc)
+            self.assertEqual(api._image_count(), first)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

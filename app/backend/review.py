@@ -142,7 +142,13 @@ def block_sentences(b: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 # ---------------------------------------------------------------- 批注对象
 def build_annotation(raw: Dict[str, Any], blocks_by_id: Dict[str, Dict],
-                     seq: int) -> Optional[Dict[str, Any]]:
+                     seq: int,
+                     sent_list: List[Dict[str, Any]] | None = None) -> Optional[Dict[str, Any]]:
+    """把模型返回的一条建议落成批注对象。
+
+    sent_list 可以传入调用方已经算好的句子列表 —— 一篇 1000 段、500 条批注的
+    文档里，每次都重新切句会让审查尾段变成明显的卡顿。
+    """
     bid = str(raw.get("block_id") or "").strip()
     b = blocks_by_id.get(bid)
     if not b or b["kind"] == "table":
@@ -157,7 +163,7 @@ def build_annotation(raw: Dict[str, Any], blocks_by_id: Dict[str, Dict],
     repl = clean_replacement(str(repl))
 
     segs = b["segs"]
-    sents = block_sentences(b)
+    sents = sent_list if sent_list is not None else block_sentences(b)
     anchor = None
     target = (raw.get("target") or "").strip()
 
@@ -226,9 +232,15 @@ def apply_accepted(blocks: List[Dict[str, Any]],
     for a in anns:
         if a["status"] == "accepted" and a["op"] in ("replace", "replace_sentence", "insert_after") and a.get("anchor"):
             by_block.setdefault(a["block_id"], []).append(a)
+    if not by_block:
+        return out
+
+    # 先建 id -> block 索引：旧版对每条批注都线性扫一遍 blocks，
+    # 1000 段 × 500 条批注就是 50 万次比较，点一次「全部保留」要卡好几秒。
+    index = {b["id"]: b for b in out}
 
     for bid, ops in by_block.items():
-        b = next((x for x in out if x["id"] == bid), None)
+        b = index.get(bid)
         if not b:
             continue
         # 从后往前改，避免偏移失效。
@@ -384,11 +396,16 @@ def _tokens_with_marks(segs, marks) -> List[Dict[str, Any]]:
 
 def render_tokens(block: Dict[str, Any], anns: List[Dict[str, Any]],
                   mode: str) -> List[Dict[str, Any]]:
-    """mode: original | annotated | revised"""
-    ops = [a for a in anns if a["block_id"] == block["id"]]
+    """mode: original | annotated | revised
+
+    调用方应传入「已经按 block_id 过滤好的」批注列表 ——
+    _ser_blocks 会一次性分组，避免每段都全量扫一遍批注表。
+    """
     if block["kind"] == "table" or mode == "original":
         return [{"k": "t", "v": s["v"]} if s["t"] == "text" else {"k": "i", "img": s}
                 for s in block.get("segs", [])]
+
+    ops = [a for a in anns if a["block_id"] == block["id"]]
 
     if mode == "revised":
         accepted = [a for a in ops

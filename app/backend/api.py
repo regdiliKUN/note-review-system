@@ -660,13 +660,20 @@ class Api:
     # ------------------------------------------------------------ 视图数据
     def _ser_blocks(self, blocks, anns, mode):
         out = []
+        # 一次性把批注按段落分组：旧版每渲染一段都要扫完整张批注表，
+        # 1000 段 × 500 条批注 = 50 万次比较，三份视图就是 150 万次。
+        grouped: dict = {}
+        for a in anns:
+            grouped.setdefault(a["block_id"], []).append(a)
+        empty: list = []
         for b in blocks:
             if b["kind"] == "table":
+                # 表格单元格不参与批注渲染，直接给纯 token，省掉一次分组查找
                 rows = []
                 for row in b.get("rows", []):
                     rows.append([{"tokens": review.render_tokens(
                         {"id": b["id"], "kind": "para", "segs": c.get("segs", [])},
-                        anns, mode)} for c in row])
+                        empty, "original")} for c in row])
                 out.append({"id": b["id"], "kind": "table", "rows": rows,
                             "level": 0, "no": ""})
                 continue
@@ -675,7 +682,8 @@ class Api:
                 "kind": b["kind"],
                 "level": b.get("level", 0),
                 "no": b.get("heading_no", ""),
-                "tokens": review.render_tokens(b, anns, mode),
+                "style": b.get("style") or {},
+                "tokens": review.render_tokens(b, grouped.get(b["id"], empty), mode),
             })
         return out
 
@@ -686,6 +694,17 @@ class Api:
         前端还要接一个几 MB 的 JSON —— 这是交互卡顿的主因。
         """
         return tuple((a.get("id"), a.get("status")) for a in self.anns)
+
+    def _image_count(self) -> int:
+        """图片总数只算一次：它在文档生命周期内不会变，
+        但 _payload 每次状态切换都会被调用。"""
+        doc = self.doc
+        if doc is None:
+            return 0
+        if getattr(self, "_img_doc", None) is not doc:
+            self._img_doc = doc
+            self._img_n = docmodel.count_images(doc["blocks"])
+        return self._img_n
 
     def _toc(self, blocks):
         return [{"id": b["id"], "level": b.get("level", 1),
@@ -722,7 +741,7 @@ class Api:
                 "title": self.doc["title"],
                 "path": self.doc["path"],
                 "name": os.path.basename(self.doc["path"]),
-                "images": docmodel.count_images(blocks),
+                "images": self._image_count(),
                 "blocks": len(blocks),
                 "asset_dir": self.doc["asset_dir"],
                 "doc_id": self.doc["doc_id"],

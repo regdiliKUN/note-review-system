@@ -132,24 +132,24 @@ def _pieces(blocks: List[Dict[str, Any]], budget: int = 1500) -> List[Dict[str, 
     for b in blocks:
         if b["kind"] == "table":
             if _table_plain(b).strip():
-                out.append({"b": b, "lo": 0, "hi": 0})
+                out.append({"b": b, "lo": 0, "hi": 0, "sents": []})
             continue
         sents = block_sentences(b)
         if not sents:
             if b["kind"] == "image":
-                out.append({"b": b, "lo": 0, "hi": 0})
+                out.append({"b": b, "lo": 0, "hi": 0, "sents": []})
             continue
         total = sum(len(s["text"]) for s in sents) + 24
         if total <= budget:
-            out.append({"b": b, "lo": 0, "hi": len(sents)})
+            out.append({"b": b, "lo": 0, "hi": len(sents), "sents": sents})
             continue
         lo, size = 0, 0
         for i, s in enumerate(sents):
             size += len(s["text"])
             if size >= budget and i > lo:
-                out.append({"b": b, "lo": lo, "hi": i})
+                out.append({"b": b, "lo": lo, "hi": i, "sents": sents})
                 lo, size = i, len(s["text"])
-        out.append({"b": b, "lo": lo, "hi": len(sents)})
+        out.append({"b": b, "lo": lo, "hi": len(sents), "sents": sents})
     return out
 
 
@@ -162,8 +162,7 @@ def _chunk_pieces(pieces: List[Dict[str, Any]], budget: int = 1500) -> List[List
         if b["kind"] == "table":
             n = len(_table_plain(b)) + 24
         else:
-            sents = block_sentences(b)
-            n = sum(len(s["text"]) for s in sents[p["lo"]:p["hi"]]) + 24
+            n = sum(len(s["text"]) for s in p["sents"][p["lo"]:p["hi"]]) + 24
         if cur and size + n > budget:
             chunks.append(cur)
             cur, size = [], 0
@@ -200,7 +199,7 @@ def _render_chunk(pieces: List[Dict[str, Any]]) -> str:
             out.append(f"[{b['id']}｜表格]\n{_table_plain(b)}")
             continue
         label = {"heading": "标题", "list": "列表", "image": "图片"}.get(b["kind"], "正文")
-        sents = block_sentences(b)
+        sents = p.get("sents") or block_sentences(b)
         sel = sents[p["lo"]:p["hi"]]
         if not sel:
             if b["kind"] == "image":
@@ -247,8 +246,13 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     已完成的批注全部保留，不会白跑。
     """
     blocks = doc["blocks"]
-    chunks = _chunk_pieces(_pieces(blocks))
+    pieces = _pieces(blocks)
+    chunks = _chunk_pieces(pieces)
     by_id = {b["id"]: b for b in blocks}
+    # 每个段落的句子切分只做一次，供所有批注复用
+    sents_map: Dict[str, List[Dict[str, Any]]] = {}
+    for p in pieces:
+        sents_map.setdefault(p["b"]["id"], p["sents"])
     anns: List[Dict[str, Any]] = []
     seen: set = set()
     seq = [0]
@@ -288,7 +292,8 @@ def review_document(doc: Dict[str, Any], llm: LLM,
         for it in items:
             if not isinstance(it, dict):
                 continue
-            a = build_annotation(it, by_id, seq[0] + 1)
+            a = build_annotation(it, by_id, seq[0] + 1,
+                                 sent_list=sents_map.get(str(it.get("block_id") or "").strip()))
             if not a:
                 dropped += 1
                 continue
@@ -445,6 +450,9 @@ def _img_mime(ext: str) -> str:
 
 
 VISION_MAX_SIDE = 1024
+# 同一张图在文档里重复出现（页眉 logo、重复截图）时，压缩+编码只做一次
+_VISION_CACHE: Dict[str, tuple] = {}
+_VISION_CACHE_MAX = 256
 
 
 def _vision_payload(blob: bytes, ext: str):
@@ -453,6 +461,11 @@ def _vision_payload(blob: bytes, ext: str):
     只影响「送模型的副本」：磁盘上的原图、界面显示和导出始终是原始格式与清晰度，
     不做任何有损替换。没有 Pillow 时退回原图。
     """
+    import hashlib
+    key = hashlib.md5(blob).hexdigest()
+    hit = _VISION_CACHE.get(key)
+    if hit is not None:
+        return hit
     try:
         import io
 
@@ -471,9 +484,13 @@ def _vision_payload(blob: bytes, ext: str):
             im = im.convert("RGB")
         buf = io.BytesIO()
         im.save(buf, "JPEG", quality=90, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+        out = (base64.b64encode(buf.getvalue()).decode(), "image/jpeg")
     except Exception:
-        return base64.b64encode(blob).decode(), _img_mime(ext)
+        out = (base64.b64encode(blob).decode(), _img_mime(ext))
+    if len(_VISION_CACHE) >= _VISION_CACHE_MAX:
+        _VISION_CACHE.clear()
+    _VISION_CACHE[key] = out
+    return out
 
 
 def analyze_images(doc: Dict[str, Any], llm: LLM,
