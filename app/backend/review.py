@@ -154,7 +154,7 @@ def build_annotation(raw: Dict[str, Any], blocks_by_id: Dict[str, Dict],
     repl = raw.get("replacement") or ""
     if isinstance(repl, list):
         repl = "".join(str(x) for x in repl)
-    repl = str(repl)
+    repl = clean_replacement(str(repl))
 
     segs = b["segs"]
     sents = block_sentences(b)
@@ -252,6 +252,72 @@ def apply_accepted(blocks: List[Dict[str, Any]],
 
 _DUP_PUNCT = re.compile(r"([。，、；：！？,;:!?])\1+")
 _SPACE_PUNCT = re.compile(r"[ \t]+([，。、；：！？）】」』])")
+
+# 模型很喜欢在 replacement 前面加一句「修改后：」，整句塞进正文就成了病句
+_REPL_PREFIX = re.compile(
+    r"^\s*(?:修改后|修改为|改为|建议改为|建议|替换为|替换成|更正为|修正后|"
+    r"正确写法|答案|output|replacement)\s*[：:]\s*", re.I)
+_PLACEHOLDER = re.compile(r"^(?:…+|\.{3,}|-+|（略）|\(略\)|同上|无|略|N/?A)$", re.I)
+
+
+def clean_replacement(t: str) -> str:
+    """清洗模型给的替换文本：去前缀、去整体包裹的引号、去占位符。"""
+    if not t:
+        return ""
+    s = str(t).strip()
+    s = _REPL_PREFIX.sub("", s)
+    for a, b in (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"),
+                 ("`", "`"), ("「", "」"), ("『", "』")):
+        if len(s) >= 2 and s.startswith(a) and s.endswith(b):
+            s = s[1:-1].strip()
+    return s
+
+
+def is_placeholder(t: str) -> bool:
+    return bool(_PLACEHOLDER.match((t or "").strip()))
+
+
+def keep_annotation(a: Dict[str, Any]) -> bool:
+    """过滤掉「改了等于没改」和「说不清为什么改」的批注。
+
+    模型的典型噪声：
+      · replacement 是「……」或「（略）」这种占位符
+      · 整句替换却完全没写 reason，作者无法判断要不要采纳
+      · 只提醒不修改，但 reason 只有两个字
+    """
+    if a.get("op") == "comment":
+        return len((a.get("reason") or "").strip()) >= 4
+    repl = (a.get("replacement") or "").strip()
+    if not repl or is_placeholder(repl):
+        return False
+    if a.get("op") in ("replace", "replace_sentence") and not (a.get("reason") or "").strip():
+        return False
+    return True
+
+
+def dedupe_conflicts(anns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """同一处文字只允许一条「整句替换」。
+
+    模型偶尔会对同一句给出两条互相矛盾的改写，两条都采纳会让文字变成
+    半句 A 半句 B。这里保留严重度最高的一条，其余丢弃。
+    """
+    best: Dict[Any, Dict[str, Any]] = {}
+    for a in anns:
+        if a.get("op") != "replace_sentence" or not a.get("anchor"):
+            continue
+        key = (a["block_id"], tuple(a["anchor"]))
+        cur = best.get(key)
+        if cur is None or SEVERITY_ORDER.get(a["severity"], 1) < SEVERITY_ORDER.get(cur["severity"], 1):
+            best[key] = a
+    if not best:
+        return anns
+    keep_ids = {id(v) for v in best.values()}
+    out = []
+    for a in anns:
+        if a.get("op") == "replace_sentence" and a.get("anchor") and id(a) not in keep_ids:
+            continue
+        out.append(a)
+    return out
 
 
 def tidy_punct(t: str) -> str:

@@ -92,6 +92,8 @@ class Api:
             "video_max_frames": 12,
             "history_dir": "",
             "history_keep": 8,
+            "review_level": "normal",
+            "glossary": [],
             "relayout": {
                 "add_toc": True, "number_headings": True,
                 "merge_lines": True, "normalize_text": True,
@@ -178,6 +180,8 @@ class Api:
             "provider": self.cfg.get("provider", "ollama"),
             "base": self.cfg.get("base", ""),
             "relayoutOpts": self.cfg.get("relayout", {}),
+            "reviewLevel": self.cfg.get("review_level", "normal"),
+            "glossary": self.cfg.get("glossary", []),
             "recent": self.cfg.get("recent", [])[:8],
             "pending": self.pending_path,
             "history": self.history_info(),
@@ -651,7 +655,10 @@ class Api:
         try:
             prog("正在准备…", 0.02)
             rep: dict = {}
-            anns = review_document(self.doc, llm, on_progress=prog, report=rep)
+            anns = review_document(
+                self.doc, llm, on_progress=prog, report=rep,
+                level=str(self.cfg.get("review_level") or "normal"),
+                glossary=self.cfg.get("glossary") or [])
             self.anns = anns
             # 图像理解：生成说明、标注位置、识别敏感/不一致/需人工核对
             self.image_report = analyze_images(
@@ -660,7 +667,7 @@ class Api:
                 concurrency=int(self.cfg.get("vision_concurrency", 3) or 3))
             self.anns.extend(review.image_annotations(self.image_report, len(self.anns)))
             if do_summary:
-                self.summary = summarize(self.doc, llm)
+                self.summary = summarize(self.doc, llm, on_progress=prog)
                 ir = self.image_report or {}
                 if ir.get("total"):
                     flagged = sum(1 for it in ir.get("items", [])
@@ -757,6 +764,25 @@ class Api:
         return self._payload(extra={"affected": len(targets)})
 
     # ------------------------------------------------------------ 重排
+    def set_review_opts(self, level: str = "", glossary=None) -> dict:
+        """审校力度与术语白名单。level 留空表示不改。"""
+        if level:
+            if level not in ("light", "normal", "strict"):
+                return {"ok": False, "error": f"未知的审校力度：{level}"}
+            self.cfg["review_level"] = level
+        if glossary is not None:
+            if isinstance(glossary, str):
+                glossary = re.split(r"[\n,，、;；]+", glossary)
+            terms = []
+            for g in glossary:
+                g = str(g).strip()
+                if g and g not in terms:
+                    terms.append(g)
+            self.cfg["glossary"] = terms[:200]
+        self._save_cfg()
+        return {"ok": True, "reviewLevel": self.cfg.get("review_level", "normal"),
+                "glossary": self.cfg.get("glossary", [])}
+
     def _rebuild_relayout(self):
         if not self.relayout_on or not self.doc:
             self.relaid = None

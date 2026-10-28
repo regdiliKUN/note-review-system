@@ -35,3 +35,13 @@
 | 28 | docmodel.export_docx | 列表按 list_level 递进缩进 | 导出的 Word 保留层级观感 |
 | 29 | docmodel.parse_text | Markdown 表格识别为 table block | 知识点对照表不再退化成一堆竖线 |
 | 30 | docmodel._guess_title | 标题推断分级 + 噪声词过滤（页码/日期/目录） | 大量笔记的标题从噪声变成真正的标题 |
+| 31 | review.clean_replacement | 去掉「修改后：」前缀与整体包裹的引号 | 采纳后不再把「修改后：」四个字写进正文 |
+| 32 | review.keep_annotation | 过滤占位符替换、无理由的整句改写、两字批注 | 批注列表里的噪声显著减少 |
+| 33 | review.dedupe_conflicts | 同一处文字只保留严重度最高的一条整句替换 | 修掉「两条冲突改写都采纳导致半句A半句B」 |
+| 34 | pipeline._doc_context | 每块送审都带上全文标题与大纲 | 模型不再把上文定义过的术语当「缺失知识」重复补充 |
+| 35 | pipeline.review_document | 每块带上「紧接上文」的末两句 | 跨块被切断的句子不再被误判为病句 |
+| 36 | pipeline._system_review | 审校力度三档（轻/标准/严格） | 用户可按笔记类型调节批注密度 |
+| 37 | pipeline._system_review | 术语白名单注入 prompt | 专有名词、自造写法不会被当成错别字改掉 |
+| 38 | pipeline.summarize | 长文档改 map-reduce，先分段提要点再汇总 | 摘要不再只看前 6000 字，长笔记后半篇终于进得来 |
+| 39 | pipeline.summarize | 要点/大纲去重与限长 | 摘要不再出现三条一样的要点 |
+| 40 | pipeline.analyze_images | 图像送审带上作者写的替代文字 | 有 alt 的图能被更准确地判读 |

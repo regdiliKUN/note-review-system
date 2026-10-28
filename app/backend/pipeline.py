@@ -10,7 +10,8 @@ from typing import Any, Callable, Dict, List
 
 from .docmodel import block_plain, block_text_only
 from .llm import LLM, LLMError, VisionUnsupported, extract_json
-from .review import block_sentences, build_annotation
+from .review import (block_sentences, build_annotation, dedupe_conflicts,
+                     keep_annotation as review_keep)
 
 SYSTEM_REVIEW = """你是一位资深的中文笔记审校与知识编辑专家。用户会给你一篇零散的个人笔记，\
 按段落和句子编号列出。你要找出真正的问题，并给出可以直接采纳的修改。
@@ -52,6 +53,56 @@ severity 取 high / medium / low。"""
 
 SYSTEM_SUMMARY = """你是中文笔记的结构编辑。请阅读整篇笔记，输出一份 JSON 归纳结果。\
 只输出 JSON，不要解释。"""
+
+SYSTEM_MAP = """你是中文笔记的要点提取器。用户会给你一篇长笔记的其中一段，\
+请提炼出 3-6 条「事实性要点」——只写笔记里真正讲到的内容，不要评价、不要补充、\
+不要写成「本段介绍了……」这种空话。每条不超过 30 字。
+只输出 JSON：{"points":["要点1","要点2"]}"""
+
+# 审校力度：直接决定模型「敢不敢改」
+REVIEW_LEVELS = {
+    "light": "只挑硬错误：错别字、事实/数据错误、明显病句。措辞风格上的差异一律不提，"
+             "没有硬错误就返回空数组。",
+    "normal": "按标准力度审校：硬错误 + 确实值得改的表达与结构问题。",
+    "strict": "严格审校：除硬错误外，还要指出可以更精确、更简洁的表达，"
+              "并主动补充关键缺失的定义与前提。允许给出较多批注。",
+}
+
+SUMMARY_DIRECT_LIMIT = 6000     # 超过这个字数就走 map-reduce
+
+
+def _system_review(level: str = "normal", glossary: list | None = None) -> str:
+    parts = [SYSTEM_REVIEW]
+    lvl = REVIEW_LEVELS.get((level or "normal").lower(), REVIEW_LEVELS["normal"])
+    parts.append(f"\n本次审校力度：{lvl}")
+    if glossary:
+        terms = [str(g).strip() for g in glossary if str(g).strip()][:80]
+        if terms:
+            parts.append(
+                "术语白名单（作者固定的写法与专有名词，**不要**当成错别字或表达问题去改）："
+                + "、".join(terms))
+    return "\n".join(parts)
+
+
+def _doc_context(doc: Dict[str, Any]) -> str:
+    """给每一块都带上全文语境。
+
+    只把这一块单独丢给模型，它看不到上下文，很容易把「上文已经定义过的术语」
+    当成「缺失的知识」再补充一遍 —— 这正是旧版批注里最扎眼的一类噪声。
+    """
+    title = (doc.get("title") or "").strip() or "未命名"
+    heads = []
+    for b in doc["blocks"]:
+        if b["kind"] == "heading":
+            t = block_text_only(b).strip()
+            if t:
+                heads.append(t.replace("\n", " ")[:30])
+        if len(heads) >= 12:
+            break
+    out = [f"文档标题：{title}"]
+    if heads:
+        out.append("全文结构：" + " ／ ".join(heads))
+    return "\n".join(out)
 
 
 def _table_plain(b) -> str:
@@ -185,7 +236,9 @@ def _ask_json(llm: LLM, system: str, user: str, attempts: int = 2) -> Dict[str, 
 
 def review_document(doc: Dict[str, Any], llm: LLM,
                     on_progress: Callable[[str, float], None] | None = None,
-                    report: Dict[str, Any] | None = None
+                    report: Dict[str, Any] | None = None,
+                    level: str = "normal",
+                    glossary: list | None = None
                     ) -> List[Dict[str, Any]]:
     """逐块送审。单块失败不会拖垮整篇 —— 失败的分块会记进 report。"""
     blocks = doc["blocks"]
@@ -197,19 +250,24 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     total = max(1, len(chunks))
     failed: List[Dict[str, Any]] = []
     empty = 0
+    dropped = 0
+    system = _system_review(level, glossary)
+    doc_ctx = _doc_context(doc)
+    prev_tail = ""
 
     for i, chunk in enumerate(chunks):
         if on_progress:
             on_progress(f"正在审查第 {i + 1}/{total} 段…", i / total * 0.9)
         user = (
-            f"文档标题：{doc.get('title', '未命名')}\n\n"
+            f"{doc_ctx}\n\n"
             f"以下是笔记的第 {i + 1}/{total} 部分（[b3｜正文] 是段落编号，"
-            f"行首数字是句号编号 sid）：\n\n"
-            f"{_render_chunk(chunk)}\n\n"
+            f"行首数字是句号编号 sid）：\n"
+            + (f"\n【紧接上文】{prev_tail}\n" if prev_tail else "\n")
+            + f"\n{_render_chunk(chunk)}\n\n"
             f"请审校以上内容，按格式输出 JSON。"
         )
         try:
-            data = _ask_json(llm, SYSTEM_REVIEW, user)
+            data = _ask_json(llm, system, user)
         except LLMError as e:
             # 一块失败不该让整篇白跑：记下来，继续下一块
             failed.append({"chunk": i + 1, "error": str(e)})
@@ -223,6 +281,10 @@ def review_document(doc: Dict[str, Any], llm: LLM,
                 continue
             a = build_annotation(it, by_id, seq[0] + 1)
             if not a:
+                dropped += 1
+                continue
+            if not review_keep(a):
+                dropped += 1
                 continue
             key = (a["block_id"], a.get("sid"), a["type"], a["replacement"])
             if key in seen:
@@ -234,15 +296,25 @@ def review_document(doc: Dict[str, Any], llm: LLM,
             got += 1
         if not got and not items:
             empty += 1
+        # 记录本块末尾两句，作为下一块的「紧接上文」
+        last = chunk[-1]
+        if last["b"]["kind"] != "table":
+            sents = block_sentences(last["b"])
+            tail = sents[max(0, last["hi"] - 2):last["hi"]]
+            prev_tail = "".join(s["text"] for s in tail).strip()[:200]
 
-    # 严重问题排前面，方便作者先看要紧的
+    # 同一句的冲突改写只留一条，再按严重度排序
+    before = len(anns)
+    anns = dedupe_conflicts(anns)
+    conflicts = before - len(anns)
     anns.sort(key=lambda a: (SEVERITY_RANK(a["severity"]),
                              int(a["block_id"][1:]) if a["block_id"][1:].isdigit() else 0))
     for i, a in enumerate(anns):
         a["id"] = f"a{i + 1}"
     if report is not None:
         report.update({"chunks": len(chunks), "failed": failed, "empty": empty,
-                       "annotations": len(anns)})
+                       "annotations": len(anns), "dropped": dropped,
+                       "conflicts": conflicts, "level": level})
     if on_progress:
         on_progress("正在生成整体归纳…", 0.92)
     return anns
@@ -252,14 +324,60 @@ def SEVERITY_RANK(s: str) -> int:
     return {"high": 0, "medium": 1, "low": 2}.get(s, 1)
 
 
-def summarize(doc: Dict[str, Any], llm: LLM) -> Dict[str, Any]:
+def _split_text(text: str, size: int) -> List[str]:
+    """按段落边界切分长文本，尽量不把句子切断。"""
+    parts, cur, n = [], [], 0
+    for para in text.split("\n"):
+        if n + len(para) > size and cur:
+            parts.append("\n".join(cur))
+            cur, n = [], 0
+        cur.append(para)
+        n += len(para) + 1
+    if cur:
+        parts.append("\n".join(cur))
+    return [p for p in parts if p.strip()]
+
+
+def summarize(doc: Dict[str, Any], llm: LLM,
+              on_progress: Callable[[str, float], None] | None = None) -> Dict[str, Any]:
+    """整篇归纳。
+
+    长文档不再「截断到 6000 字」—— 那等于把后半篇直接扔掉。
+    现在先分段提炼要点（map），再用要点做整体归纳（reduce）。
+    """
     blocks = [b for b in doc["blocks"] if b["kind"] != "table"]
     text = "\n".join(block_plain(b) for b in blocks)
-    text = re.sub(r"⟦图\d+⟧", "", text)
-    if len(text) > 6000:
-        text = text[:6000]
+    text = re.sub(r"⟦图\d+⟧", "", text).strip()
+    if not text:
+        return {"summary": "", "key_points": [], "outline": [], "gaps": [],
+                "map_reduce": False, "covered": 0}
+
+    map_reduce = False
+    covered = len(text)
+    if len(text) > SUMMARY_DIRECT_LIMIT:
+        parts = _split_text(text, 5000)[:16]
+        points: List[str] = []
+        for i, p in enumerate(parts):
+            if on_progress:
+                on_progress(f"正在提炼要点 {i + 1}/{len(parts)}…", 0.93 + 0.03 * (i / len(parts)))
+            try:
+                d = _ask_json(llm, SYSTEM_MAP,
+                              f"这是长笔记的第 {i + 1}/{len(parts)} 部分：\n\n{p}\n\n"
+                              "请按格式输出 JSON。", attempts=1)
+            except LLMError:
+                continue
+            for x in (d.get("points") or []):
+                x = str(x).strip()
+                if x and x not in points:
+                    points.append(x)
+        if points:
+            map_reduce = True
+            text = "以下是这篇长笔记各部分提炼出的要点（按原文顺序）：\n" + "\n".join(
+                f"- {p}" for p in points[:120])
+            covered = len(text)
+
     user = (
-        f"标题：{doc.get('title','')}\n\n笔记全文：\n{text}\n\n"
+        f"标题：{doc.get('title', '')}\n\n笔记全文：\n{text}\n\n"
         "请输出 JSON：\n"
         '{"summary":"用2-4句话概括这篇笔记讲了什么（150字内）",'
         '"key_points":["要点1","要点2","要点3"],'
@@ -267,15 +385,29 @@ def summarize(doc: Dict[str, Any], llm: LLM) -> Dict[str, Any]:
         '"gaps":["笔记中明显缺失、建议补充的内容"]}'
     )
     try:
-        raw = llm.generate(SYSTEM_SUMMARY, user, json_mode=True)
-        d = extract_json(raw)
+        d = _ask_json(llm, SYSTEM_SUMMARY, user, attempts=1)
     except LLMError:
         d = {}
+
+    def _uniq(v, limit=12):
+        out, seen = [], set()
+        for x in (v or []):
+            s = str(x).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s[:120])
+            if len(out) >= limit:
+                break
+        return out
+
     return {
-        "summary": d.get("summary", ""),
-        "key_points": d.get("key_points") or [],
-        "outline": d.get("outline") or [],
-        "gaps": d.get("gaps") or [],
+        "summary": str(d.get("summary") or "").strip()[:600],
+        "key_points": _uniq(d.get("key_points"), 12),
+        "outline": _uniq(d.get("outline"), 12),
+        "gaps": _uniq(d.get("gaps"), 10),
+        "map_reduce": map_reduce,
+        "covered": covered,
     }
 
 
@@ -433,6 +565,9 @@ def analyze_images(doc: Dict[str, Any], llm: LLM,
             e["check_note"] = f"图片文件读取失败：{ex}"
             return e
         ctx: List[str] = []
+        alt = (s.get("alt") or "").strip()
+        if alt:
+            ctx.append("作者为该图写的替代文字：" + alt[:120])
         own = block_text_only(it["block"]).strip()
         if own:
             ctx.append("本段：" + own[:200])

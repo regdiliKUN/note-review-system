@@ -46,10 +46,15 @@ def index(blocks):
 
 
 class MockLLM:
-    """按队列返回预设文本，同时记录收到的 prompt。"""
+    """按队列返回预设文本，同时记录收到的 prompt。
 
-    def __init__(self, replies=None):
+    传 `fn=(system, user) -> str` 可以按 prompt 内容动态应答，
+    比预设队列更适合「一轮 map、一轮 reduce」这种多阶段流程。
+    """
+
+    def __init__(self, replies=None, fn=None):
         self.replies = list(replies or [])
+        self.fn = fn
         self.calls = []
         self._vision_blocked = False
         self.model = "mock"
@@ -57,6 +62,8 @@ class MockLLM:
 
     def generate(self, system, user, json_mode=True, on_token=None):
         self.calls.append({"system": system, "user": user})
+        if self.fn is not None:
+            return self.fn(system, user)
         if not self.replies:
             return "{}"
         r = self.replies.pop(0)
@@ -1106,6 +1113,184 @@ class TestParseDocx(unittest.TestCase):
     def test_no_footnotes_does_not_crash(self):
         doc = self._build(lambda d: d.add_paragraph("正文。"))
         self.assertTrue(doc["blocks"])
+
+
+# ══════════════════════════════════════════════════════ 批注质量
+class TestAnnotationQuality(unittest.TestCase):
+    def test_clean_replacement_prefix(self):
+        self.assertEqual(review.clean_replacement("修改后：正确的句子。"), "正确的句子。")
+        self.assertEqual(review.clean_replacement("建议改为: 更好的写法"), "更好的写法")
+
+    def test_clean_replacement_quotes(self):
+        self.assertEqual(review.clean_replacement("“带引号的句子。”"), "带引号的句子。")
+        self.assertEqual(review.clean_replacement("`code()`"), "code()")
+
+    def test_clean_replacement_keeps_normal(self):
+        self.assertEqual(review.clean_replacement("普通句子。"), "普通句子。")
+
+    def test_placeholder_detected(self):
+        for s in ("……", "...", "（略）", "同上", "N/A"):
+            self.assertTrue(review.is_placeholder(s), s)
+        self.assertFalse(review.is_placeholder("真实内容"))
+
+    def test_keep_annotation_drops_placeholder(self):
+        a = {"op": "replace_sentence", "replacement": "……", "reason": "这里有问题"}
+        self.assertFalse(review.keep_annotation(a))
+
+    def test_keep_annotation_requires_reason(self):
+        a = {"op": "replace_sentence", "replacement": "新句子。", "reason": ""}
+        self.assertFalse(review.keep_annotation(a))
+
+    def test_keep_annotation_comment_needs_substance(self):
+        self.assertFalse(review.keep_annotation(
+            {"op": "comment", "reason": "注意", "replacement": ""}))
+        self.assertTrue(review.keep_annotation(
+            {"op": "comment", "reason": "本节缺少小标题，建议拆分", "replacement": ""}))
+
+    def test_keep_annotation_accepts_good(self):
+        a = {"op": "replace_sentence", "replacement": "新句子。", "reason": "原句把年份写错了"}
+        self.assertTrue(review.keep_annotation(a))
+
+    def test_dedupe_conflicts_keeps_highest_severity(self):
+        anns = [
+            {"id": "a1", "block_id": "b0", "op": "replace_sentence", "anchor": [0, 0, 0, 4],
+             "severity": "low", "replacement": "版本A"},
+            {"id": "a2", "block_id": "b0", "op": "replace_sentence", "anchor": [0, 0, 0, 4],
+             "severity": "high", "replacement": "版本B"},
+        ]
+        out = review.dedupe_conflicts(anns)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["replacement"], "版本B")
+
+    def test_dedupe_conflicts_keeps_different_positions(self):
+        anns = [
+            {"id": "a1", "block_id": "b0", "op": "replace_sentence", "anchor": [0, 0, 0, 4],
+             "severity": "low", "replacement": "A"},
+            {"id": "a2", "block_id": "b0", "op": "replace_sentence", "anchor": [0, 4, 0, 8],
+             "severity": "low", "replacement": "B"},
+        ]
+        self.assertEqual(len(review.dedupe_conflicts(anns)), 2)
+
+    def test_dedupe_conflicts_keeps_inserts(self):
+        anns = [
+            {"id": "a1", "block_id": "b0", "op": "insert_after", "anchor": [0, 4, 0, 4],
+             "severity": "low", "replacement": "补充1"},
+            {"id": "a2", "block_id": "b0", "op": "insert_after", "anchor": [0, 4, 0, 4],
+             "severity": "low", "replacement": "补充2"},
+        ]
+        self.assertEqual(len(review.dedupe_conflicts(anns)), 2)
+
+
+# ══════════════════════════════════════════════════════ 审查上下文
+class TestReviewContext(unittest.TestCase):
+    def _doc(self):
+        blocks = index([
+            heading("ZBrush 建模"),
+            heading("一、笔刷", 2),
+            para(txt("DynaMesh 是常用的重构工具。")),
+            para(txt("第二个段落的正文内容。")),
+        ])
+        return {"title": "ZBrush 建模", "blocks": blocks}
+
+    def test_doc_context_has_outline(self):
+        ctx = pipeline._doc_context(self._doc())
+        self.assertIn("ZBrush 建模", ctx)
+        self.assertIn("一、笔刷", ctx)
+
+    def test_prompt_carries_outline_and_prev_tail(self):
+        doc = self._doc()
+        m = MockLLM([])
+        pipeline.review_document(doc, m)
+        self.assertGreaterEqual(len(m.calls), 1)
+        self.assertIn("全文结构", m.calls[0]["user"])
+
+    def test_level_changes_system_prompt(self):
+        doc = self._doc()
+        m1 = MockLLM([])
+        pipeline.review_document(doc, m1, level="light")
+        m2 = MockLLM([])
+        pipeline.review_document(doc, m2, level="strict")
+        self.assertIn("只挑硬错误", m1.calls[0]["system"])
+        self.assertIn("严格审校", m2.calls[0]["system"])
+
+    def test_glossary_injected(self):
+        doc = self._doc()
+        m = MockLLM([])
+        pipeline.review_document(doc, m, glossary=["DynaMesh", "ZBrush"])
+        self.assertIn("术语白名单", m.calls[0]["system"])
+        self.assertIn("DynaMesh", m.calls[0]["system"])
+
+    def test_report_counts(self):
+        doc = self._doc()
+        rep = {}
+        pipeline.review_document(doc, MockLLM([]), report=rep)
+        for k in ("chunks", "failed", "empty", "annotations", "dropped", "level"):
+            self.assertIn(k, rep)
+
+
+class TestSummaryMapReduce(unittest.TestCase):
+    def test_long_doc_uses_map_reduce(self):
+        body = "".join(f"第{i}段讲的是某个具体知识点，内容比较长。\n" for i in range(900))
+        blocks = index([para(txt(body))])
+        doc = {"title": "长文", "blocks": blocks}
+        map_reply = json.dumps({"points": ["要点甲", "要点乙"]}, ensure_ascii=False)
+        final_reply = json.dumps({"summary": "总述", "key_points": ["k"], "outline": [],
+                                  "gaps": []}, ensure_ascii=False)
+
+        def fn(system, user):
+            return map_reply if "要点提取器" in system else final_reply
+
+        m = MockLLM(fn=fn)
+        s = pipeline.summarize(doc, m)
+        self.assertTrue(s["map_reduce"])
+        self.assertEqual(s["summary"], "总述")
+        self.assertGreater(len(m.calls), 2, "长文档必须先分段提炼再汇总")
+
+    def test_short_doc_single_call(self):
+        blocks = index([para(txt("很短的一段笔记内容。"))])
+        reply = json.dumps({"summary": "短", "key_points": [], "outline": [], "gaps": []},
+                           ensure_ascii=False)
+        m = MockLLM([reply])
+        s = pipeline.summarize({"title": "t", "blocks": blocks}, m)
+        self.assertFalse(s["map_reduce"])
+        self.assertEqual(len(m.calls), 1)
+
+    def test_dedupes_key_points(self):
+        blocks = index([para(txt("内容。"))])
+        reply = json.dumps({"summary": "s", "key_points": ["a", "a", "b"],
+                            "outline": ["x", "x"], "gaps": []}, ensure_ascii=False)
+        s = pipeline.summarize({"title": "t", "blocks": blocks}, MockLLM([reply]))
+        self.assertEqual(s["key_points"], ["a", "b"])
+        self.assertEqual(s["outline"], ["x"])
+
+
+class TestReviewOpts(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_opts_")
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_set_level(self):
+        r = self.api.set_review_opts("strict")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["reviewLevel"], "strict")
+
+    def test_bad_level_rejected(self):
+        r = self.api.set_review_opts("疯狂")
+        self.assertFalse(r["ok"])
+
+    def test_glossary_split(self):
+        r = self.api.set_review_opts("", "DynaMesh，ZBrush、SubTool\nUV")
+        self.assertEqual(r["glossary"], ["DynaMesh", "ZBrush", "SubTool", "UV"])
+
+    def test_glossary_deduped(self):
+        r = self.api.set_review_opts("", ["A", "A", " B "])
+        self.assertEqual(r["glossary"], ["A", "B"])
 
 
 if __name__ == "__main__":
