@@ -319,6 +319,16 @@
         <div class="hint">专有名词、自造缩写、团队内部叫法写在这里，模型不会去「纠正」它们。</div>
       </div>
       <div class="field">
+        <label>环境自检</label>
+        <div class="diag" id="diagBox">
+          <div class="hint">点「运行自检」检查模型服务、图像理解、ffmpeg、语音转写、磁盘与历史目录是否就绪。</div>
+        </div>
+        <div class="diag-actions">
+          <button class="btn btn-ghost btn-sm" id="btnDiag">运行自检</button>
+          <button class="btn btn-ghost btn-sm" id="btnOpenLog">打开日志文件夹</button>
+        </div>
+      </div>
+      <div class="field">
         <label>重排选项</label>
         <div class="checks">
           <label class="ck"><input type="checkbox" data-opt="add_toc"> 生成目录</label>

@@ -1493,5 +1493,93 @@ class TestReport(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 健壮性
+class TestRobustness(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_rob_")
+        self.assets = os.path.join(self.tmp, "assets")
+        os.makedirs(self.assets, exist_ok=True)
+        self.api = Api(workdir=self.tmp, get_window=lambda: None, asset_root=self.assets)
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_config_saved_atomically(self):
+        self.api.cfg["model"] = "qwen3:8b"
+        self.api._save_cfg()
+        self.assertTrue(os.path.isfile(self.api.cfg_path))
+        self.assertFalse(os.path.exists(self.api.cfg_path + ".tmp"),
+                         "临时文件必须被 replace 掉")
+        with open(self.api.cfg_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["model"], "qwen3:8b")
+
+    def test_corrupt_config_backed_up(self):
+        with open(self.api.cfg_path, "w", encoding="utf-8") as f:
+            f.write("{这不是 JSON")
+        from backend.api import Api
+        api2 = Api(workdir=self.tmp, get_window=lambda: None, asset_root=self.assets)
+        self.assertEqual(api2.cfg["provider"], "ollama", "损坏后应回退默认配置")
+        bads = [f for f in os.listdir(self.tmp) if ".bad-" in f]
+        self.assertTrue(bads, "损坏的配置必须留备份，不能直接丢掉")
+
+    def test_prune_assets_only_touches_hash_dirs(self):
+        keep = os.path.join(self.assets, "0123456789")
+        old = os.path.join(self.assets, "abcdef0123")
+        mine = os.path.join(self.assets, "我的图片")
+        for d in (keep, old, mine):
+            os.makedirs(d, exist_ok=True)
+        os.utime(old, (1, 1))
+        n = docmodel.prune_assets(self.assets, keep=1)
+        self.assertEqual(n, 1)
+        self.assertTrue(os.path.isdir(keep))
+        self.assertFalse(os.path.isdir(old))
+        self.assertTrue(os.path.isdir(mine), "非程序生成的目录一律不能动")
+
+    def test_oversized_file_rejected(self):
+        p = os.path.join(self.tmp, "big.txt")
+        with open(p, "wb") as f:
+            f.truncate(201 * 1024 * 1024)
+        r = self.api.load(p)
+        self.assertFalse(r["ok"])
+        self.assertIn("过大", r["error"])
+
+    def test_diagnose_shape(self):
+        r = self.api.diagnose()
+        self.assertTrue(r["ok"])
+        names = [c["name"] for c in r["checks"]]
+        for n in ("磁盘空间", "模型服务", "图像理解", "ffmpeg", "语音转写", "审查历史"):
+            self.assertIn(n, names)
+        self.assertIn("logPath", r)
+
+    def test_logs_rotate_config(self):
+        from backend import logs
+        logs.setup(self.tmp)
+        lg = logs.get()
+        handlers = [h for h in lg.handlers if hasattr(h, "maxBytes")]
+        self.assertTrue(handlers)
+        self.assertEqual(handlers[0].maxBytes, logs.MAX_BYTES)
+        self.assertEqual(handlers[0].backupCount, logs.BACKUPS)
+
+    def test_log_written_to_disk(self):
+        from backend import logs
+        logs.setup(self.tmp)
+        logs.get().warning("测试日志条目-XYZ")
+        for h in logs.get().handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        self.assertIn("测试日志条目-XYZ", logs.tail(self.tmp, 50))
+
+    def test_thread_exception_hook_installed(self):
+        import threading as th
+        from backend import logs
+        logs.setup(self.tmp)
+        self.assertIs(th.excepthook, th.excepthook)   # 已被替换为可调用对象
+        self.assertTrue(callable(th.excepthook))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

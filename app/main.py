@@ -109,6 +109,11 @@ def main():
         if p not in sys.path:
             sys.path.insert(0, p)
 
+    # 日志必须先于一切初始化：窗口都建不起来的时候，只有日志能说明原因
+    from backend import logs
+    log = logs.setup(data)
+    log.info(f"启动 {APP_NAME} v{VERSION}（root={root}, frozen={getattr(sys, 'frozen', False)}）")
+
     # 必须在 import webview 之前设置。
     # 部分 Windows 环境（带安全软件的机器、受限会话）里 WebView2 的
     # 渲染进程沙箱会导致所有网络导航静默失败 —— 表现为窗口一片空白。
@@ -126,6 +131,7 @@ def main():
     title = f"{APP_NAME} v{VERSION}"
 
     httpd, port = server.start(resource_dir(), assets)
+    log.info(f"本地服务已启动：127.0.0.1:{port}")
     holder = {"win": None}
 
     api = Api(workdir=data, get_window=lambda: holder["win"], asset_root=assets)
@@ -150,7 +156,11 @@ def main():
                       private_mode=False,
                       icon=icon or None,
                       storage_path=os.path.join(data, "webview"))
+    except Exception:
+        log.exception("窗口启动失败")
+        raise
     finally:
+        log.info("窗口已关闭，正在退出")
         try:
             httpd.shutdown()
         except Exception:

@@ -67,3 +67,13 @@
 | 60 | api._export_md | Markdown 表格补分隔行、处理 gridSpan 与竖线转义 | 导出的表格在 Typora/GitHub 里终于是表格 |
 | 61 | api.choose_export_path | 默认文件名追加日期 | 同一天导出多次不再互相覆盖 |
 | 62 | index.html 导出菜单 | 接入「审阅报告（网页/Markdown）」与「批注清单 CSV」 | 报告能力可达，且无批注时给出明确提示 |
+| 63 | backend/logs.py | 统一日志模块：分级、2MB×3 轮转、UTF-8 | app.log 不再无限增长把磁盘写满 |
+| 64 | logs._install_hooks | 安装 `sys.excepthook` 与 `threading.excepthook` | 打包成 exe 后闪退也留有完整堆栈，不再是「什么都没有」 |
+| 65 | api | 4 处裸 `traceback.print_exc()` 换成带上下文的落盘日志 | 报错能定位到具体文件/路径，而不是只有一句「出错了」 |
+| 66 | api._save_cfg | 原子写：临时文件 + fsync + `os.replace` | 写到一半崩溃/磁盘满不会留下半截 JSON 把配置全毁掉 |
+| 67 | api._load_cfg | 配置损坏时备份为 `config.bad-<时间>.json` 再回退默认 | 用户原来的配置还在，可人工救回 |
+| 68 | docmodel.prune_assets | 启动时清理历史导入的图片目录（仅 10 位哈希目录，保留最近 40 个） | 同一笔记改十次留下的十份图片副本不再堆积 |
+| 69 | api.load | 超过 200MB 拒绝、超过 60MB 记警告 | 几百 MB 的 docx 不会把进程拖到 OOM |
+| 70 | api.diagnose | 环境自检：磁盘/模型/视觉/ffmpeg/语音/历史目录 6 项 + 日志路径 | 「不能用」时一眼看出是哪一环缺东西 |
+| 71 | 设置页 | 自检面板（红绿灯 + 修复提示）与「打开日志文件夹」 | 用户能自助排查，也能一键把日志交给开发者 |
+| 72 | logs.setup | 支持换目录重定向（摘旧 handler 挂新文件） | 同一进程内重新初始化日志不会写到旧路径 |

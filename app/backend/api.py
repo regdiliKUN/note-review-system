@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 
-from . import docmodel, history as hist, media, relayout as rl, report as rpt, review
+from . import docmodel, history as hist, logs, media, relayout as rl, report as rpt, review
 from .llm import LLM, LLMError
 from .pipeline import analyze_images, review_document, summarize
 
@@ -48,6 +48,7 @@ class Api:
         self.get_window = get_window
         self.asset_root = asset_root
         self.cfg_path = os.path.join(workdir, "config.json")
+        logs.setup(workdir)
         self.cfg = self._load_cfg()
         # 审查历史：默认与程序目录同级（本机在 I 盘），不可写时按优先级回退
         self.app_root = os.path.dirname(os.path.abspath(workdir))
@@ -106,21 +107,48 @@ class Api:
         try:
             with open(self.cfg_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("配置文件不是 JSON 对象")
             default.update({k: v for k, v in d.items() if v is not None})
             default["relayout"] = {**{"add_toc": True, "number_headings": True,
                                       "merge_lines": True, "normalize_text": True,
                                       "add_summary": True, "ensure_heading": True},
                                    **(d.get("relayout") or {})}
-        except Exception:
+        except FileNotFoundError:
             pass
+        except Exception as e:
+            # 配置损坏时不要静默吞掉，也不要直接覆盖用户原来的文件：
+            # 备份成 config.bad-<时间>.json，再用默认值启动。
+            bad = self.cfg_path.replace(".json", "") + time.strftime(
+                ".bad-%Y%m%d%H%M%S", time.localtime()) + ".json"
+            try:
+                shutil.copy2(self.cfg_path, bad)
+            except Exception:
+                bad = ""
+            logs.get().warning(f"配置文件读取失败（{e}），已备份到 {bad or '（备份失败）'}，"
+                               "本次使用默认配置启动")
         return default
 
     def _save_cfg(self):
+        """原子写：先写临时文件再 replace。
+
+        旧版直接 open(path,'w')，写到一半崩溃（或磁盘满）会留下半截 JSON，
+        下次启动配置全丢 —— 模型名、API Key、历史目录全部回退默认。
+        """
+        tmp = self.cfg_path + ".tmp"
         try:
-            with open(self.cfg_path, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.cfg, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.cfg_path)
+        except Exception as e:
+            logs.get().warning(f"配置保存失败：{e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
 
     def _llm(self) -> LLM:
         return LLM({
@@ -147,14 +175,23 @@ class Api:
 
     # ------------------------------------------------------------ 启动
     def _log(self, msg: str):
-        try:
-            with open(os.path.join(self.workdir, "app.log"), "a", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
-        except Exception:
-            pass
+        logs.get().info(msg)
+
+    def _warn(self, msg: str):
+        logs.get().warning(msg)
+
+    def _err(self, msg: str):
+        logs.exception(msg)
 
     def boot(self) -> dict:
         self._log("boot() 被前端调用 —— 页面脚本已运行")
+        # 顺手清理历史导入残留的图片目录（只动程序自己生成的哈希目录）
+        try:
+            n = docmodel.prune_assets(self.asset_root, keep=40)
+            if n:
+                self._log(f"已清理 {n} 个历史图片目录")
+        except Exception:
+            pass
         llm = self._llm()
         h = llm.health()
         models = h.get("models") or []
@@ -205,6 +242,100 @@ class Api:
         self.cfg["vision_model"] = vision_model or ""
         self._save_cfg()
         return {"ok": True, "health": self._llm().health()}
+
+    # ------------------------------------------------------------ 环境自检
+    def diagnose(self) -> dict:
+        """一次性体检：磁盘、模型服务、视觉、ffmpeg、语音、历史目录、日志。
+
+        用户报「不能用」时，先看这里就能定位到是哪一环缺东西，
+        而不是让他在设置页里逐个试。
+        """
+        checks = []
+
+        def add(name, ok, detail, hint=""):
+            checks.append({"name": name, "ok": bool(ok), "detail": detail, "hint": hint})
+
+        # 磁盘
+        try:
+            du = shutil.disk_usage(self.workdir)
+            free_gb = du.free / 1024 ** 3
+            add("磁盘空间", free_gb > 0.5,
+                f"可用 {free_gb:.1f} GB（总 {du.total / 1024 ** 3:.0f} GB）",
+                "" if free_gb > 0.5 else "空间不足，审查历史与图片可能写入失败")
+        except Exception as e:
+            add("磁盘空间", False, f"无法读取：{e}")
+
+        # 模型服务
+        try:
+            llm = self._llm()
+            h = llm.health()
+            if h.get("ok"):
+                add("模型服务", True,
+                    f"{h.get('provider')} 可用，{len(h.get('models') or [])} 个模型")
+            else:
+                add("模型服务", False, h.get("msg") or "无法连接",
+                    "本机模式请先启动 Ollama（ollama serve）；"
+                    "也可在设置里改用 OpenAI 兼容 API")
+        except Exception as e:
+            add("模型服务", False, f"探测失败：{e}")
+
+        # 视觉
+        try:
+            vs = self._vision_status()
+            if vs.get("enabled"):
+                add("图像理解", True, f"已启用 {vs.get('model')}")
+            else:
+                add("图像理解", False, vs.get("reason") or "未启用视觉模型",
+                    "图片仍会按原文位置逐张标注，只是不做内容识别；"
+                    "装一个多模态模型（如 qwen2.5vl）即可自动启用")
+        except Exception as e:
+            add("图像理解", False, f"探测失败：{e}")
+
+        # ffmpeg
+        try:
+            ff, fp = media.find_ffmpeg(self.cfg)
+            add("ffmpeg", bool(ff), ff or "未找到",
+                "" if ff else "语音/视频笔记需要它抽音轨与关键帧；可在设置里填 ffmpeg.exe 路径")
+        except Exception as e:
+            add("ffmpeg", False, f"探测失败：{e}")
+
+        # 语音识别
+        try:
+            st = media.asr_status(self.cfg)
+            add("语音转写", st.get("ok"), st.get("detail") or "", 
+                "" if st.get("ok") else "语音笔记会只保留时长信息，无法生成可审查的文字")
+        except Exception as e:
+            add("语音转写", False, f"探测失败：{e}")
+
+        # 历史目录
+        try:
+            probe = os.path.join(self.history_dir, ".probe")
+            os.makedirs(self.history_dir, exist_ok=True)
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(probe)
+            add("审查历史", True, f"{self.history_dir}（{self.history_source}）",
+                self.history_warning or "")
+        except Exception as e:
+            add("审查历史", False, f"不可写：{e}",
+                "结果仍可导出，但下次打开同一文件不会自动载入上次结果")
+
+        bad = [c for c in checks if not c["ok"]]
+        return {"ok": True, "checks": checks,
+                "problems": len(bad),
+                "logPath": logs.log_path(self.workdir),
+                "logTail": logs.tail(self.workdir, 40),
+                "version": _app_version()}
+
+    def open_log(self) -> dict:
+        """打开日志文件夹（报错时让用户能直接把日志发过来）。"""
+        try:
+            os.makedirs(self.workdir, exist_ok=True)
+            os.startfile(self.workdir)  # noqa: S606
+            return {"ok": True, "dir": self.workdir,
+                    "log": logs.log_path(self.workdir)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def refresh_models(self) -> dict:
         h = self._llm().health()
@@ -276,6 +407,19 @@ class Api:
             return {"ok": False,
                     "error": f"暂不支持 {ext} 格式；可导入 docx/doc/txt/md，"
                              f"以及 mp3/wav/m4a 等语音、mp4/mov 等视频、png/jpg 等图片"}
+        # 超大文件保护：python-docx 会把整份 XML 读进内存，
+        # 几百 MB 的 docx 在 8G 内存的机器上会直接把进程拖死。
+        try:
+            size = os.path.getsize(path)
+            if size > 200 * 1024 * 1024:
+                return {"ok": False,
+                        "error": f"文件过大（{size / 1024 / 1024:.0f} MB）。"
+                                 "本程序面向个人笔记，建议拆分后再导入，"
+                                 "或先用 Word 另存为 .docx（去掉历史版本与批注）压缩体积。"}
+            if size > 60 * 1024 * 1024:
+                self._warn(f"导入较大文件 {size / 1024 / 1024:.0f} MB：{path}")
+        except Exception:
+            pass
 
         with self._lock:
             doc_id = _sha(path + str(os.path.getmtime(path)))
@@ -296,7 +440,7 @@ class Api:
                 else:
                     parsed = docmodel.parse_text(path, store)
             except Exception as e:
-                traceback.print_exc()
+                self._err(f"解析失败：{path}")
                 return {"ok": False, "error": f"解析失败：{e}"}
 
             self.doc = {
@@ -730,7 +874,7 @@ class Api:
             self.busy = False
             return {"ok": False, "error": str(e)}
         except Exception as e:
-            traceback.print_exc()
+            self._err("审查出错")
             self.busy = False
             return {"ok": False, "error": f"审查出错：{e}"}
 
@@ -890,7 +1034,7 @@ class Api:
             else:
                 return {"ok": False, "error": f"不支持的格式 {fmt}"}
         except Exception as e:
-            traceback.print_exc()
+            self._err(f"导出失败：{out_path}")
             return {"ok": False, "error": f"导出失败：{e}"}
         return {"ok": True, "path": out_path, "format": fmt}
 
@@ -926,7 +1070,7 @@ class Api:
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(body)
         except Exception as e:
-            traceback.print_exc()
+            self._err(f"导出报告失败：{out_path}")
             return {"ok": False, "error": f"导出报告失败：{e}"}
         return {"ok": True, "path": out_path, "format": fmt}
 

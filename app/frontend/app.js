@@ -465,6 +465,30 @@ function wire() {
     toast('设置已保存', 'ok');
   };
 
+  // 环境自检
+  $('#btnDiag').onclick = async () => {
+    const box = $('#diagBox');
+    box.innerHTML = '<div class="hint">正在检查…</div>';
+    try {
+      const r = await window.pywebview.api.diagnose();
+      if (!r || r.ok === false) { box.innerHTML = '<div class="hint">自检失败</div>'; return; }
+      box.innerHTML = r.checks.map(c =>
+        `<div class="diag-row ${c.ok ? 'ok' : 'bad'}">
+           <i></i>
+           <div class="dr-main"><b>${esc(c.name)}</b><span>${esc(c.detail || '')}</span></div>
+         </div>` + (c.hint && !c.ok ? `<div class="diag-hint">${esc(c.hint)}</div>` : '')
+      ).join('') + `<div class="hint" style="margin-top:8px">
+        日志：${esc(r.logPath || '')}　共 ${r.problems || 0} 项待处理</div>`;
+    } catch (e) {
+      box.innerHTML = `<div class="hint">自检失败：${esc(e)}</div>`;
+    }
+  };
+  $('#btnOpenLog').onclick = async () => {
+    const r = await window.pywebview.api.open_log();
+    if (r && r.ok) toast('已打开日志文件夹', 'ok');
+    else toast((r && r.error) || '无法打开', 'err');
+  };
+
   // 导出
   $('#btnExport').onclick = e => { e.stopPropagation(); $('#exportMenu').classList.toggle('on'); };
   document.addEventListener('click', () => $('#exportMenu').classList.remove('on'));

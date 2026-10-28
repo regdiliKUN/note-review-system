@@ -69,6 +69,33 @@ def block_text_only(b: Dict[str, Any]) -> str:
     return "".join(s["v"] for s in b.get("segs", []) if s["t"] == "text")
 
 
+def prune_assets(root: str, keep: int = 40) -> int:
+    """清理历史导入残留的图片目录。
+
+    每次导入都会按 (路径+修改时间) 生成一个新的 doc_id 目录，同一份笔记改十次
+    就会留下十个图片副本，长期下来占满磁盘。这里只删除**程序自己生成的**
+    10 位十六进制目录，保留最近 keep 个；任何不符合该命名的目录一律不动。
+    """
+    removed = 0
+    try:
+        items = []
+        for fn in os.listdir(root):
+            d = os.path.join(root, fn)
+            if not os.path.isdir(d) or not re.fullmatch(r"[0-9a-f]{10}", fn):
+                continue
+            try:
+                items.append((os.path.getmtime(d), d))
+            except Exception:
+                continue
+        items.sort(reverse=True)
+        for _, d in items[max(1, keep):]:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+    except Exception:
+        pass
+    return removed
+
+
 def count_images(blocks: List[Dict[str, Any]]) -> int:
     n = 0
     for b in blocks:
