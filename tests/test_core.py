@@ -742,6 +742,36 @@ class TestParseText(unittest.TestCase):
         text = "".join(s["v"] for b in d["blocks"] for s in b["segs"])
         self.assertIn("UTF16 内容", text)
 
+    def test_markdown_table_becomes_table_block(self):
+        md = ("说明段落。\n\n"
+              "| 概念 | 定义 |\n"
+              "|:---|---:|\n"
+              "| **闭包** | 捕获外部变量的函数 |\n"
+              "| 柯里化 | 多参变单参 |\n\n"
+              "表格之后的段落。\n")
+        p = self._write("t.md", md)
+        d = docmodel.parse_text(p, self.store)
+        tables = [b for b in d["blocks"] if b["kind"] == "table"]
+        self.assertEqual(len(tables), 1)
+        rows = tables[0]["rows"]
+        self.assertEqual(len(rows), 3, "表头 + 两行数据，分隔行要丢掉")
+        self.assertEqual(rows[0][0]["segs"][0]["v"], "概念")
+        self.assertEqual(rows[1][0]["segs"][0]["v"], "闭包", "单元格内的 markdown 要清掉")
+
+    def test_markdown_table_keeps_order(self):
+        md = "前文。\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n后文。\n"
+        p = self._write("o.md", md)
+        d = docmodel.parse_text(p, self.store)
+        kinds = [b["kind"] for b in d["blocks"]]
+        self.assertLess(kinds.index("table"), len(kinds) - 1)
+        self.assertEqual(kinds[0], "para")
+        self.assertEqual(kinds[-1], "para")
+
+    def test_pipe_line_without_separator_stays_paragraph(self):
+        p = self._write("p.md", "a | b 只是普通的一行文字\n")
+        d = docmodel.parse_text(p, self.store)
+        self.assertFalse(any(b["kind"] == "table" for b in d["blocks"]))
+
 
 # ══════════════════════════════════════════════════════ 标题推断
 class TestInferHeadings(unittest.TestCase):
@@ -982,6 +1012,100 @@ class TestApi(unittest.TestCase):
         r = self.api.quit()
         self.assertFalse(r["ok"])
         self.assertTrue(r["busy"])
+
+
+# ══════════════════════════════════════════════════════ docx 解析保真
+class TestGuessTitle(unittest.TestCase):
+    def test_prefers_h1(self):
+        blocks = index([para(txt("目录")), heading("真正的标题"), para(txt("正文。"))])
+        self.assertEqual(docmodel._guess_title(blocks), "真正的标题")
+
+    def test_skips_page_noise(self):
+        blocks = index([para(txt("Page 1")), para(txt("2024-05-01")), para(txt("目录")),
+                        para(txt("ZBrush 建模笔记"))])
+        self.assertEqual(docmodel._guess_title(blocks), "ZBrush 建模笔记")
+
+    def test_fallback_to_first_text(self):
+        blocks = index([para(txt("很长" * 30)), para(txt("短标题"))])
+        self.assertEqual(docmodel._guess_title(blocks), "短标题")
+
+    def test_empty(self):
+        self.assertEqual(docmodel._guess_title([]), "未命名笔记")
+
+
+class TestParseDocx(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nr_docx_")
+        self.store = docmodel.ImageStore(self.tmp, "d")
+        self.path = os.path.join(self.tmp, "t.docx")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build(self, build):
+        from docx import Document
+        d = Document()
+        build(d)
+        d.save(self.path)
+        return docmodel.parse_docx(self.path, self.store)
+
+    def test_title_from_core_properties(self):
+        def b(d):
+            d.core_properties.title = "我的正式标题"
+            d.add_paragraph("随便一段正文。")
+        doc = self._build(b)
+        self.assertEqual(doc["title"], "我的正式标题")
+
+    def test_merged_table_cells_not_duplicated(self):
+        def b(d):
+            t = d.add_table(rows=2, cols=3)
+            t.cell(0, 0).merge(t.cell(0, 2))
+            t.cell(0, 0).text = "合并表头"
+            t.cell(1, 0).text = "A"
+            t.cell(1, 1).text = "B"
+            t.cell(1, 2).text = "C"
+        doc = self._build(b)
+        tables = [x for x in doc["blocks"] if x["kind"] == "table"]
+        self.assertEqual(len(tables), 1)
+        rows = tables[0]["rows"]
+        flat = "".join(s["v"] for c in rows[0] for s in c["segs"])
+        self.assertEqual(flat.count("合并表头"), 1, "合并单元格的文字不能重复")
+        self.assertEqual(rows[0][0]["span"], 3)
+
+    def test_list_level_kept(self):
+        def b(d):
+            d.add_paragraph("一级", style="List Bullet")
+            d.add_paragraph("二级", style="List Bullet 2")
+        doc = self._build(b)
+        levels = [x["style"].get("list_level") for x in doc["blocks"] if x["kind"] == "list"]
+        self.assertIn(1, levels)
+
+    def test_quote_style_flagged(self):
+        def b(d):
+            d.add_paragraph("引用的话", style="Quote")
+        doc = self._build(b)
+        self.assertTrue(any(x["style"].get("quote") for x in doc["blocks"]))
+
+    def test_image_alt_captured(self):
+        from docx.shared import Inches
+        png = os.path.join(self.tmp, "a.png")
+        from PIL import Image
+        Image.new("RGB", (30, 20), (10, 120, 200)).save(png)
+
+        def b(d):
+            run = d.add_paragraph().add_run()
+            run.add_picture(png, width=Inches(1))
+            # python-docx 没有直接 API，手工写 descr
+            for dp in run._element.iter(docmodel.DOCPR):
+                dp.set("descr", "架构图")
+                break
+        doc = self._build(b)
+        alts = [s.get("alt") for x in doc["blocks"] for s in x["segs"] if s["t"] == "img"]
+        self.assertIn("架构图", alts)
+
+    def test_no_footnotes_does_not_crash(self):
+        doc = self._build(lambda d: d.add_paragraph("正文。"))
+        self.assertTrue(doc["blocks"])
 
 
 if __name__ == "__main__":

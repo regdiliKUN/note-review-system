@@ -25,3 +25,13 @@
 | 18 | api.export | 自动创建不存在的输出目录 | 手输路径不再直接失败 |
 | 19 | api._export_md | 重导出前只清理本程序产出的 `NNN_*.ext` 图片 | 反复导出不会堆积旧图，也不会误删用户文件 |
 | 20 | api.quit / api.load | 审查进行中禁止退出与切换文档 | 避免后台线程把结果写进另一份文档 |
+| 21 | docmodel.handle_table | 按 `w:tc` 元素去重 | 合并单元格的表头不再重复写 2-3 遍 |
+| 22 | docmodel 表格 | 保留 gridSpan / vMerge，导出时还原合并 | 表格结构与原文一致，不再是「每格都是表头」 |
+| 23 | docmodel.handle_paragraph | 列表层级取 numPr/ilvl，并用样式名兜底 | 多级列表重排后不再全部顶格 |
+| 24 | docmodel.handle_paragraph | 识别「引用 / 代码」样式并写入 block.style | 导出时能还原引用缩进与代码块，为后续样式化导出打底 |
+| 25 | docmodel.run_segs | 读取 `wp:docPr@descr` 作为图片替代文字 | 图注可用于无障碍与后续图像审查上下文 |
+| 26 | docmodel.parse_docx | 标题优先取文档属性的 title | 标题不再被「目录」「Page 1」抢占 |
+| 27 | docmodel._docx_notes | 抽取 footnotes.xml / endnotes.xml | 学术笔记的脚注来源不再整段丢失 |
+| 28 | docmodel.export_docx | 列表按 list_level 递进缩进 | 导出的 Word 保留层级观感 |
+| 29 | docmodel.parse_text | Markdown 表格识别为 table block | 知识点对照表不再退化成一堆竖线 |
+| 30 | docmodel._guess_title | 标题推断分级 + 噪声词过滤（页码/日期/目录） | 大量笔记的标题从噪声变成真正的标题 |

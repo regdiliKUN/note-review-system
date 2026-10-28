@@ -37,6 +37,7 @@ R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}
 R_LINK = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link"
 WP_EXTENT = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}extent"
 A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+DOCPR = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}docPr"
 
 
 # ---------------------------------------------------------------- 数据结构
@@ -193,7 +194,7 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
             else:
                 segs.append({"t": "text", "v": t})
 
-        def add_image(rid, cx=None, cy=None):
+        def add_image(rid, cx=None, cy=None, alt=""):
             # 优先读内嵌图片；失败则尝试外部链接图片（R_LINK）
             blob = None
             ext = None
@@ -224,7 +225,7 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
                 "file": info["file"],
                 "w": _emu_to_px(cx),
                 "h": _emu_to_px(cy),
-                "alt": "",
+                "alt": (alt or "")[:200],
             })
 
         # 按 XML 文档顺序遍历，保证 文字/图片 相对位置准确
@@ -241,10 +242,14 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
                 for ext_el in r.iter(WP_EXTENT):
                     cx, cy = ext_el.get("cx"), ext_el.get("cy")
                     break
+                alt = ""
+                for dp in r.iter(DOCPR):
+                    alt = dp.get("descr") or dp.get("title") or ""
+                    break
                 for blip in r.iter(A_BLIP):
                     rid = blip.get(R_EMBED) or blip.get(R_LINK)
                     if rid:
-                        add_image(rid, cx, cy)
+                        add_image(rid, cx, cy, alt)
             elif tag == VML_IMAGEDATA:
                 rid = r.get(R_ID)
                 if rid:
@@ -262,7 +267,8 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
         from docx.text.paragraph import Paragraph
         p = Paragraph(p_el, doc)
         segs = run_segs(p_el, p.part if hasattr(p, "part") else doc.part)
-        style = (p.style.name or "").lower()
+        style_raw = p.style.name or ""
+        style = style_raw.lower()
         text = "".join(s["v"] for s in segs if s["t"] == "text").strip()
 
         if not segs or (not text and not any(s["t"] == "img" for s in segs)):
@@ -272,11 +278,35 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
         m = re.match(r"heading\s*(\d)", style)
         if m:
             level = int(m.group(1))
-        elif style in ("title",):
+        elif style in ("title", "标题"):
             level = 1
 
+        # 列表层级：Word 的 numPr/ilvl 决定缩进深度，丢了它重排后会全部顶格
+        num = p_el.find(".//" + qn("w:numPr"))
+        list_level = 0
+        if num is not None:
+            ilvl = num.find(qn("w:ilvl"))
+            if ilvl is not None:
+                try:
+                    list_level = max(0, min(int(ilvl.get(qn("w:val")) or 0), 8))
+                except Exception:
+                    list_level = 0
+        else:
+            # 很多文档用「列表项目 2」这类样式编号，段落里并没有直接的 numPr
+            m2 = re.search(r"(?:list|列表|項目|项目)\D*(\d)\s*$", style_raw, re.I)
+            if m2:
+                list_level = max(0, min(int(m2.group(1)) - 1, 8))
+
+        flags: Dict[str, Any] = {}
+        if "quote" in style or "引用" in style_raw:
+            flags["quote"] = True
+        if "preformatted" in style or "code" in style or "代码" in style_raw:
+            flags["code"] = True
+        if num is not None or style.startswith("list") or "列表" in style_raw:
+            flags["list"] = True
+
         kind = "heading" if level else "para"
-        if style.startswith("list") or p_el.find(".//" + qn("w:numPr")) is not None:
+        if flags.get("list") and not level:
             kind = "list"
         if not text and any(s["t"] == "img" for s in segs):
             kind = "image"
@@ -284,7 +314,9 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
         align = str(p.alignment) if p.alignment is not None else ""
         container_blocks.append(new_block(
             kind, level=level, segs=segs,
-            style={"align": align, "bold": bool(text and p.runs and p.runs[0].bold)},
+            style={"align": align,
+                   "bold": bool(text and p.runs and p.runs[0].bold),
+                   "list_level": list_level, **flags},
         ))
 
     def handle_table(tbl_el, container_blocks):
@@ -293,7 +325,29 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
         rows = []
         for row in t.rows:
             cells = []
+            seen_tc = set()
             for cell in row.cells:
+                # 合并单元格在 python-docx 里会返回同一个 tc 多次，
+                # 旧版直接遍历会把表头文字重复写好几遍。
+                key = id(cell._tc)
+                span = 1
+                vmerge = ""
+                try:
+                    tcPr = cell._tc.tcPr
+                    if tcPr is not None:
+                        gs = tcPr.find(qn("w:gridSpan"))
+                        if gs is not None:
+                            span = max(1, int(gs.get(qn("w:val")) or 1))
+                        vm = tcPr.find(qn("w:vMerge"))
+                        if vm is not None:
+                            vmerge = "restart" if (vm.get(qn("w:val")) or "").lower() == "restart" \
+                                else "continue"
+                except Exception:
+                    pass
+                if key in seen_tc:
+                    cells.append({"segs": [], "span": span, "vmerge": "continue"})
+                    continue
+                seen_tc.add(key)
                 csegs: List[Dict[str, Any]] = []
                 for p in cell.paragraphs:
                     s = run_segs(p._p, doc.part)
@@ -301,7 +355,7 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
                         if csegs:
                             csegs.append({"t": "text", "v": "\n"})
                         csegs += s
-                cells.append({"segs": csegs})
+                cells.append({"segs": csegs, "span": span, "vmerge": vmerge})
             rows.append(cells)
         if rows:
             container_blocks.append(new_block("table", rows=rows))
@@ -322,6 +376,14 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
 
     walk(body)
 
+    # 脚注 / 尾注：学术类笔记的引用来源常写在这里，旧版直接丢掉
+    notes = _docx_notes(doc)
+    if notes:
+        blocks.append(new_block("heading", level=1,
+                                segs=[{"t": "text", "v": "脚注与尾注"}]))
+        for label, text in notes:
+            blocks.append(new_block("list", segs=[{"t": "text", "v": f"{label} {text}"}]))
+
     # 标题兜底：文档没有 heading 样式时，从文本特征推断
     if not any(b["kind"] == "heading" for b in blocks):
         infer_headings(blocks)
@@ -329,10 +391,48 @@ def parse_docx(path: str, store: ImageStore) -> Dict[str, Any]:
     for i, b in enumerate(blocks):
         b["id"] = f"b{i}"
 
+    # 文档属性里的标题最权威，比「第一段前 40 字」可靠得多
+    title = ""
+    try:
+        title = (doc.core_properties.title or "").strip()
+    except Exception:
+        pass
+
     return {
         "blocks": blocks,
-        "title": _guess_title(blocks),
+        "title": title or _guess_title(blocks),
     }
+
+
+def _docx_notes(doc) -> List[tuple]:
+    """抽取 word/footnotes.xml 与 endnotes.xml 里的注释正文。"""
+    out: List[tuple] = []
+    try:
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import qn
+
+        for part in doc.part.package.parts:
+            name = str(getattr(part, "partname", ""))
+            if name.endswith("footnotes.xml"):
+                kind, tag = "脚注", qn("w:footnote")
+            elif name.endswith("endnotes.xml"):
+                kind, tag = "尾注", qn("w:endnote")
+            else:
+                continue
+            try:
+                root = parse_xml(part.blob)
+            except Exception:
+                continue
+            for el in root.iter(tag):
+                fid = el.get(qn("w:id"))
+                if fid in (None, "-1", "0"):
+                    continue
+                text = "".join(t.text or "" for t in el.iter(qn("w:t"))).strip()
+                if text:
+                    out.append((f"[{kind} {fid}]", text))
+    except Exception:
+        pass
+    return out
 
 
 # ---------------------------------------------------------------- 纯文本 / Markdown
@@ -376,6 +476,28 @@ def parse_text(path: str, store: ImageStore) -> Dict[str, Any]:
         in_code = False
         code_buf: List[str] = []
 
+        # 先把 Markdown 表格整块抽出来，换成占位符。
+        # 旧版把 `| a | b |` 当普通段落，导出 Word 后是一堆竖线，
+        # 而笔记里用表格对齐知识点其实非常常见。
+        tables: List[List[List[str]]] = []
+        pre: List[str] = []
+        i = 0
+        while i < len(lines):
+            ln = lines[i]
+            if ln.strip().startswith("|") and i + 1 < len(lines) and _is_md_sep(lines[i + 1]):
+                rows: List[List[str]] = []
+                while i < len(lines) and lines[i].strip().startswith("|"):
+                    if not _is_md_sep(lines[i]):
+                        rows.append(_md_cells(lines[i]))
+                    i += 1
+                if rows:
+                    tables.append(rows)
+                    pre.append(f"\x00TBL{len(tables) - 1}\x00")
+                continue
+            pre.append(ln)
+            i += 1
+        lines = pre
+
         def flush():
             if buf:
                 txt = "\n".join(buf).strip()
@@ -384,6 +506,14 @@ def parse_text(path: str, store: ImageStore) -> Dict[str, Any]:
                 buf.clear()
 
         for line in lines:
+            mt = re.match(r"^\x00TBL(\d+)\x00$", line)
+            if mt:
+                flush()
+                rows = tables[int(mt.group(1))]
+                blocks.append(new_block("table", rows=[
+                    [{"segs": [{"t": "text", "v": _strip_md(c).strip()}]} for c in row]
+                    for row in rows]))
+                continue
             if line.strip().startswith("```"):
                 if in_code:
                     blocks.append(new_block("para", segs=[{"t": "text", "v": "\n".join(code_buf)}],
@@ -868,6 +998,23 @@ def _strip_md(t: str) -> str:
     return t
 
 
+def _is_md_sep(line: str) -> bool:
+    """Markdown 表格的分隔行：|---|:--:|---|"""
+    s = line.strip()
+    if "|" not in s or "-" not in s:
+        return False
+    return bool(re.fullmatch(r"\|?[\s:|-]+\|[\s:|-]*", s))
+
+
+def _md_cells(line: str) -> List[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
 def _md_inline_images(line: str, base: str, store: ImageStore, seq: List[int]):
     """如果整行主要是图片引用，转成 img seg；否则返回 None 交给普通文本处理。"""
     pat = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
@@ -927,14 +1074,48 @@ def infer_headings(blocks: List[Dict[str, Any]]):
 
 
 def _guess_title(blocks: List[Dict[str, Any]]) -> str:
-    for b in blocks[:6]:
+    """猜标题。
+
+    旧版只取「前 6 块里第一个不超过 40 字的文本」，于是大量笔记的标题变成
+    「目录」「Page 1」「2024-05-01」这类噪声。现在按可信度分级：
+    一级标题 > 开头的短文本（且不是页码/日期/目录等占位）。
+    """
+    for b in blocks:
+        if b["kind"] == "heading" and b.get("level") == 1:
+            t = block_text_only(b).strip()
+            if t and len(t) <= 60:
+                return t.split("\n")[0]
+    noise = re.compile(r"^(目录|目\s*录|contents?|page\s*\d+|第?\s*\d+\s*页|"
+                       r"\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?|\d+)$", re.I)
+    for b in blocks[:8]:
         t = block_text_only(b).strip()
-        if t and len(t) <= 40:
-            return t.split("\n")[0]
+        if not t:
+            continue
+        first = t.split("\n")[0].strip()
+        if not first or len(first) > 40 or noise.match(first):
+            continue
+        return first
+    for b in blocks[:8]:
+        t = block_text_only(b).strip()
+        if t:
+            return t.split("\n")[0][:40]
     return "未命名笔记"
 
 
 # ---------------------------------------------------------------- 导出 docx
+def _cell_at(row: List[Dict[str, Any]], target: int):
+    """按 gridSpan 展开后的逻辑列号取单元格。"""
+    ci = 0
+    for cell in row:
+        span = max(1, int(cell.get("span") or 1))
+        if ci == target:
+            return cell
+        if ci > target:
+            return None
+        ci += span
+    return None
+
+
 def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
                 title: str = "", toc: bool = False):
     """把 block 模型写成 docx：seg 顺序原样落盘，图片按原位插入。"""
@@ -1003,16 +1184,44 @@ def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
             rows = b.get("rows", [])
             if not rows:
                 continue
-            ncol = max(len(r) for r in rows)
+            ncol = max(sum(max(1, int(c.get("span") or 1)) for c in r) for r in rows)
             tbl = doc.add_table(rows=len(rows), cols=ncol)
             tbl.style = "Table Grid"
+            # 先按 gridSpan 落位写内容（合并单元格的续格跳过，避免重复文字）
             for ri, row in enumerate(rows):
-                for ci, cell in enumerate(row):
+                ci = 0
+                for cell in row:
+                    span = max(1, int(cell.get("span") or 1))
                     if ci >= ncol:
                         break
-                    c = tbl.cell(ri, ci)
-                    c.paragraphs[0].text = ""
-                    write_segs(c.paragraphs[0], cell.get("segs", []))
+                    if cell.get("vmerge") != "continue":
+                        c = tbl.cell(ri, ci)
+                        c.paragraphs[0].text = ""
+                        write_segs(c.paragraphs[0], cell.get("segs", []))
+                    ci += span
+            # 再按原始合并关系还原横向/纵向合并
+            for ri, row in enumerate(rows):
+                ci = 0
+                for cell in row:
+                    span = max(1, int(cell.get("span") or 1))
+                    if span > 1 and ci + span - 1 < ncol:
+                        try:
+                            tbl.cell(ri, ci).merge(tbl.cell(ri, ci + span - 1))
+                        except Exception:
+                            pass
+                    if cell.get("vmerge") == "restart":
+                        r2 = ri + 1
+                        while r2 < len(rows):
+                            nxt = _cell_at(rows[r2], ci)
+                            if not nxt or nxt.get("vmerge") != "continue":
+                                break
+                            r2 += 1
+                        if r2 - 1 > ri:
+                            try:
+                                tbl.cell(ri, ci).merge(tbl.cell(r2 - 1, ci))
+                            except Exception:
+                                pass
+                    ci += span
             continue
 
         lvl = b.get("level", 0)
@@ -1024,7 +1233,8 @@ def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
                 par.paragraph_format.left_indent = Inches(0.3)
         write_segs(par, b.get("segs", []))
         if b["kind"] == "list":
-            par.paragraph_format.left_indent = Inches(0.3)
+            depth = int(b.get("style", {}).get("list_level") or 0)
+            par.paragraph_format.left_indent = Inches(0.3 + 0.24 * min(depth, 8))
 
     doc.save(out_path)
     return out_path
