@@ -1,0 +1,16 @@
+# 统一换行符，避免 Windows 上每个文件都显示「全部重写」
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+
+*.docx binary
+*.png  binary
+*.ico  binary
+*.exe  binary
