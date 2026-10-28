@@ -66,6 +66,8 @@ class Api:
         self.blocks_current = None
         self.busy = False
         self._lock = threading.Lock()
+        # 审查取消信号：长文档用 8B 模型要跑十几分钟，必须能中途停下
+        self._cancel = threading.Event()
         # 支持「把文件拖到快捷方式/图标上」直接打开
         self.pending_path = None
         for a in sys.argv[1:]:
@@ -624,6 +626,14 @@ class Api:
         except Exception:
             pass
 
+    def cancel_review(self) -> dict:
+        """请求中止当前审查。当前分块跑完后停下，已完成的批注全部保留。"""
+        if not self.busy:
+            return {"ok": False, "error": "当前没有正在进行的审查"}
+        self._cancel.set()
+        self._log("用户请求取消审查")
+        return {"ok": True, "message": "已请求停止，正在收尾（已完成的分块会保留）"}
+
     def run_review(self, do_summary: bool = True) -> dict:
         if not self.doc:
             return {"ok": False, "error": "请先导入笔记"}
@@ -647,6 +657,7 @@ class Api:
                 return {"ok": False, "error": "未检测到可用模型，请先启动 Ollama"}
 
         self.busy = True
+        self._cancel.clear()
         t0 = time.time()
 
         def prog(msg, pct):
@@ -658,45 +669,58 @@ class Api:
             anns = review_document(
                 self.doc, llm, on_progress=prog, report=rep,
                 level=str(self.cfg.get("review_level") or "normal"),
-                glossary=self.cfg.get("glossary") or [])
+                glossary=self.cfg.get("glossary") or [],
+                should_stop=self._cancel.is_set)
             self.anns = anns
-            # 图像理解：生成说明、标注位置、识别敏感/不一致/需人工核对
-            self.image_report = analyze_images(
-                self.doc, llm, on_progress=prog,
-                max_images=int(self.cfg.get("vision_max_images", 300) or 300),
-                concurrency=int(self.cfg.get("vision_concurrency", 3) or 3))
-            self.anns.extend(review.image_annotations(self.image_report, len(self.anns)))
-            if do_summary:
-                self.summary = summarize(self.doc, llm, on_progress=prog)
-                ir = self.image_report or {}
-                if ir.get("total"):
-                    flagged = sum(1 for it in ir.get("items", [])
-                                  if it.get("sensitive") or it.get("inconsistent") or it.get("needs_check"))
-                    note = (f"全文共 {ir.get('total')} 张图片，已自动分析 {ir.get('analyzed', 0)} 张"
-                            + (f"，其中 {flagged} 张已标注（敏感/不一致/需人工核对）。"
-                               if flagged else "，未发现明显图像问题。"))
-                    self.summary["summary"] = (self.summary.get("summary", "") + " " + note).strip()
-                    self.summary["images"] = ir
+            canceled = bool(rep.get("canceled"))
+            if canceled:
+                # 取消时跳过图像理解与摘要（这两个最耗时），直接落盘已完成的部分
+                self._log(f"审查已取消，保留 {len(anns)} 条批注")
+            else:
+                # 图像理解：生成说明、标注位置、识别敏感/不一致/需人工核对
+                self.image_report = analyze_images(
+                    self.doc, llm, on_progress=prog,
+                    max_images=int(self.cfg.get("vision_max_images", 300) or 300),
+                    concurrency=int(self.cfg.get("vision_concurrency", 3) or 3))
+                self.anns.extend(review.image_annotations(self.image_report, len(self.anns)))
+                if do_summary:
+                    self.summary = summarize(self.doc, llm, on_progress=prog)
+                    ir = self.image_report or {}
+                    if ir.get("total"):
+                        flagged = sum(1 for it in ir.get("items", [])
+                                      if it.get("sensitive") or it.get("inconsistent") or it.get("needs_check"))
+                        note = (f"全文共 {ir.get('total')} 张图片，已自动分析 {ir.get('analyzed', 0)} 张"
+                                + (f"，其中 {flagged} 张已标注（敏感/不一致/需人工核对）。"
+                                   if flagged else "，未发现明显图像问题。"))
+                        self.summary["summary"] = (self.summary.get("summary", "") + " " + note).strip()
+                        self.summary["images"] = ir
             self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
-            prog("审查完成", 1.0)
+            prog("已取消" if canceled else "审查完成", 1.0)
             self._rebuild_relayout()
             elapsed = round(time.time() - t0, 1)
             entry = self._save_history(elapsed)      # 自动持久化本次审查
             self.busy = False
             warnings = []
+            if canceled:
+                warnings.append(f"审查已取消：完成 {rep.get('done_chunks', 0)}/{rep.get('chunks', '?')} 段，"
+                                f"保留 {len(anns)} 条批注。未完成的部分可稍后重新审查。")
             if rep.get("failed"):
                 detail = "；".join(f"第 {f['chunk']} 段（{f['error'][:60]}）"
                                    for f in rep["failed"][:3])
                 warnings.append(f"有 {len(rep['failed'])}/{rep.get('chunks', '?')} 段审查失败："
                                 f"{detail}。其余部分已完成，可稍后重新审查补齐。")
-            if rep.get("empty"):
+            if rep.get("empty") and not canceled:
                 warnings.append(f"有 {rep['empty']} 段模型没有给出任何意见（可能是原文质量较好，"
                                 "也可能该段被截断）。")
+            if rep.get("dropped"):
+                warnings.append(f"已自动过滤 {rep['dropped']} 条低质量建议"
+                                "（占位符替换、没写理由的整句改写等）。")
             if not entry:
                 warnings.append("本次结果未能写入审查历史，请检查历史目录是否可写。")
             return self._payload(extra={
                 "elapsed": elapsed,
                 "reviewed": True,
+                "canceled": canceled,
                 "historySaved": entry,
                 "reviewReport": rep,
                 "warnings": warnings,

@@ -1293,5 +1293,88 @@ class TestReviewOpts(unittest.TestCase):
         self.assertEqual(r["glossary"], ["A", "B"])
 
 
+# ══════════════════════════════════════════════════════ 取消
+class TestCancel(unittest.TestCase):
+    def test_cancel_stops_between_chunks(self):
+        blocks = index([para(txt("啊" * 900)) for _ in range(4)])
+        state = {"n": 0}
+
+        def stop():
+            state["n"] += 1
+            return state["n"] > 1          # 第一次放行，第二次要求停止
+
+        rep = {}
+        pipeline.review_document({"title": "t", "blocks": blocks}, MockLLM([]),
+                                 report=rep, should_stop=stop)
+        self.assertTrue(rep["canceled"])
+        self.assertEqual(rep["done_chunks"], 1)
+
+    def test_no_cancel_flag_when_not_requested(self):
+        blocks = index([para(txt("短句。"))])
+        rep = {}
+        pipeline.review_document({"title": "t", "blocks": blocks}, MockLLM([]), report=rep)
+        self.assertFalse(rep["canceled"])
+
+    def test_api_cancel_requires_busy(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp(prefix="nr_cancel_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            r = api.cancel_review()
+            self.assertFalse(r["ok"])
+            api.busy = True
+            self.assertTrue(api.cancel_review()["ok"])
+            self.assertTrue(api._cancel.is_set())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ══════════════════════════════════════════════════════ 静态服务
+class TestServer(unittest.TestCase):
+    def setUp(self):
+        from backend import server
+        self.tmp = tempfile.mkdtemp(prefix="nr_srv_")
+        with open(os.path.join(self.tmp, "index.html"), "w", encoding="utf-8") as f:
+            f.write("<h1>hi</h1>")
+        with open(os.path.join(self.tmp, "app.js"), "w", encoding="utf-8") as f:
+            f.write("console.log(1)")
+        self.httpd, self.port = server.start(self.tmp, self.tmp)
+
+    def tearDown(self):
+        try:
+            self.httpd.shutdown()
+        except Exception:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _get(self, path):
+        import urllib.request
+        return urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}")
+
+    def test_serves_index(self):
+        with self._get("/") as r:
+            self.assertEqual(r.status, 200)
+            self.assertIn("hi", r.read().decode())
+
+    def test_scripts_are_not_long_cached(self):
+        """升级后不能还拿缓存里的旧 app.js，否则新版后端配旧版前端。"""
+        with self._get("/app.js") as r:
+            self.assertIn("no-cache", r.headers.get("Cache-Control", ""))
+
+    def test_missing_returns_404(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self._get("/nope.js")
+        self.assertEqual(cm.exception.code, 404)
+
+    def test_traversal_blocked(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self._get("/../../etc/passwd")
+        self.assertIn(cm.exception.code, (403, 404))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

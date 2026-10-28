@@ -122,6 +122,17 @@
           </button>
         </div>
         <div class="viewbar-right">
+          <div class="fontctl" id="fontCtl">
+            <button class="icon-btn sm" id="btnFontMinus" title="减小正文字号（Ctrl -）">A−</button>
+            <button class="icon-btn sm" id="btnFontPlus" title="增大正文字号（Ctrl +）">A+</button>
+          </div>
+          <button class="icon-btn" id="btnKeys" title="快捷键一览（?）" aria-label="快捷键">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2.5" y="6" width="19" height="12" rx="2.5"/>
+              <path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M8 14h8"/>
+            </svg>
+          </button>
           <div class="progress-wrap" id="progressWrap">
             <div class="progress-bar"><i id="progressFill"></i></div>
             <span id="progressTxt">准备中…</span>
@@ -168,6 +179,16 @@
           <button class="mini-btn no" id="btnRejectAll" title="全部撤销">全部撤销</button>
         </div>
       </div>
+      <div class="rb-tools">
+        <input type="search" id="annSearch" class="rb-search"
+               placeholder="搜索批注文字或理由…（按 / 聚焦）" autocomplete="off">
+        <div class="rb-sev" id="rbSev">
+          <button class="chip active" data-s="all">全部</button>
+          <button class="chip" data-s="high" title="只看高优先级">高</button>
+          <button class="chip" data-s="medium" title="只看中优先级">中</button>
+          <button class="chip" data-s="low" title="只看低优先级">低</button>
+        </div>
+      </div>
       <div class="rb-filter" id="rbFilter">
         <button class="chip active" data-f="all">全部</button>
         <button class="chip" data-f="pending">待处理</button>
@@ -177,6 +198,7 @@
       <div class="ann-list" id="annList">
         <div class="empty-mini pad">还没有批注。点击「开始 AI 审查」。</div>
       </div>
+      <div class="ann-foot" id="annFoot"></div>
     </aside>
   </div>
 
@@ -338,6 +360,45 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
+<!-- 图片灯箱 -->
+<div class="lightbox" id="lightbox">
+  <div class="lb-bar">
+    <span id="lbCap"></span>
+    <button class="icon-btn" id="btnLbClose" title="关闭（Esc）">✕</button>
+  </div>
+  <div class="lb-stage" id="lbStage"><img id="lbImg" alt=""></div>
+</div>
+
+<!-- 快捷键一览 -->
+<div class="modal-mask" id="keysMask">
+  <div class="modal modal-narrow">
+    <div class="modal-head">
+      <h3>快捷键</h3>
+      <button class="icon-btn" id="btnCloseKeys">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="keys-grid">
+        <span>切换视图</span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd><kbd>5</kbd>
+        <span>下一条 / 上一条批注</span><kbd>J</kbd><kbd>K</kbd>
+        <span>保留当前批注</span><kbd>A</kbd>
+        <span>丢弃当前批注</span><kbd>R</kbd>
+        <span>聚焦搜索框</span><kbd>/</kbd>
+        <span>放大 / 缩小正文字号</span><kbd>Ctrl</kbd><kbd>+</kbd><kbd>−</kbd>
+        <span>关闭弹层 / 灯箱</span><kbd>Esc</kbd>
+        <span>打开本面板</span><kbd>?</kbd>
+      </div>
+      <div class="hint" style="margin-top:12px">
+        提示：批注卡片上的「保留 / 丢弃」可以直接点，也可以先用 J/K 选中再用 A/R 决定，
+        一路键盘处理几十条批注比来回点鼠标快得多。
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="btnCloseKeys2">知道了</button>
+    </div>
+  </div>
+</div>
+
+<script src="/lib.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

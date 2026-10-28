@@ -1,23 +1,18 @@
 /* ══════════════════════════════════════════════════════════════
    笔记审查总结系统 — 前端逻辑
+   纯函数（转义/格式化/diff/过滤/分页）在 lib.js，这里只做 DOM 与状态。
    ══════════════════════════════════════════════════════════════ */
 'use strict';
 
-const TYPE_CLS = {
-  '错别字': 'typo', '事实纠错': 'fact', '知识补充': 'know',
-  '表达优化': 'expr', '逻辑归纳': 'induct', '结构建议': 'struct',
-  '存疑待核': 'doubt'
-};
-const TYPE_COLOR = {
-  typo: '#ef4444', fact: '#f97316', know: '#0ea5e9', expr: '#8b5cf6',
-  induct: '#10b981', struct: '#f59e0b', doubt: '#94a3b8'
-};
-const TYPE_LABEL = Object.fromEntries(Object.entries(TYPE_CLS).map(([k, v]) => [v, k]));
+const PAGE_SIZE = 60;          // 批注列表首屏条数，几百条时避免一次性渲染
 
 const S = {
   p: null,
   view: 'annotated',
   filter: 'all',
+  sev: 'all',
+  q: '',
+  page: 1,
   active: null,
   models: [],
   provider: 'ollama',
@@ -25,14 +20,15 @@ const S = {
   scrollMem: {},
   relayout: false,
   hist: null,
-  histKind: null
+  histKind: null,
+  fontSize: 0,          // -2..+4，作用在 .paper 的字号上
+  startedAt: 0,
+  lastMsg: '',
+  imgPage: 1
 };
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const esc = s => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 /* ────────────────────────────── 启动 ────────────────────────────── */
 async function init() {
@@ -158,13 +154,6 @@ function renderRecent(list) {
 }
 
 /* ────────────────────────── 审查历史 ────────────────────────── */
-function fmtBytes(n) {
-  n = Number(n) || 0;
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
-  return (n / 1024 / 1024).toFixed(1) + ' MB';
-}
-
 function openHistory() {
   renderHistory();
   $('#historyMask').classList.add('on');
@@ -270,9 +259,53 @@ function wire() {
 
   $$('#rbFilter .chip').forEach(c => c.onclick = () => {
     S.filter = c.dataset.f;
+    S.page = 1;
     $$('#rbFilter .chip').forEach(x => x.classList.toggle('active', x === c));
     renderAnns();
   });
+
+  $$('#rbSev .chip').forEach(c => c.onclick = () => {
+    S.sev = c.dataset.s;
+    S.page = 1;
+    $$('#rbSev .chip').forEach(x => x.classList.toggle('active', x === c));
+    renderAnns();
+  });
+
+  let qTimer = null;
+  $('#annSearch').oninput = e => {
+    const v = e.target.value;
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { S.q = v; S.page = 1; renderAnns(); }, 140);
+  };
+
+  // 字号调节（记忆在 localStorage，下次打开保持）
+  const applyFont = d => {
+    S.fontSize = Math.max(-3, Math.min(6, S.fontSize + d));
+    document.documentElement.style.setProperty('--paper-fs', (15.5 + S.fontSize) + 'px');
+    try { localStorage.setItem('nr.fontSize', String(S.fontSize)); } catch (e) {}
+    toast(`正文字号 ${15.5 + S.fontSize}px`, '');
+  };
+  $('#btnFontPlus').onclick = () => applyFont(1);
+  $('#btnFontMinus').onclick = () => applyFont(-1);
+  try {
+    const saved = parseInt(localStorage.getItem('nr.fontSize') || '0', 10);
+    if (!isNaN(saved) && saved) {
+      S.fontSize = 0;
+      applyFont(saved);
+    }
+  } catch (e) {}
+
+  // 快捷键面板
+  const openKeys = () => $('#keysMask').classList.add('on');
+  $('#btnKeys').onclick = openKeys;
+  $('#btnCloseKeys').onclick = () => $('#keysMask').classList.remove('on');
+  $('#btnCloseKeys2').onclick = () => $('#keysMask').classList.remove('on');
+  $('#keysMask').onclick = e => { if (e.target.id === 'keysMask') e.currentTarget.classList.remove('on'); };
+
+  // 图片灯箱
+  const closeLb = () => $('#lightbox').classList.remove('on');
+  $('#btnLbClose').onclick = closeLb;
+  $('#lightbox').onclick = e => { if (e.target.id === 'lightbox' || e.target.id === 'lbStage') closeLb(); };
 
   $('#btnAcceptAll').onclick = () => bulk('accept');
   $('#btnRejectAll').onclick = () => bulk('reject');
@@ -433,6 +466,8 @@ function wire() {
       setTimeout(() => jumpToBlock(loc.dataset.bid), 80);
       return;
     }
+    const im = e.target.closest('img');
+    if (im && im.src) { openLightbox(im.src, im.alt || ''); return; }
     const el = e.target.closest('[data-op]');
     if (el) { activate(el.dataset.op, true); return; }
     const blk = e.target.closest('.blk');
@@ -461,15 +496,66 @@ function wire() {
 
   // 快捷键
   document.addEventListener('keydown', e => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    const tag = (e.target.tagName || '').toUpperCase();
+    const typing = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+
+    // Esc：关掉所有浮层（输入框里也生效）
+    if (e.key === 'Escape') {
+      $('#lightbox').classList.remove('on');
+      $('#keysMask').classList.remove('on');
+      ['#settingsMask', '#historyMask'].forEach(sel => $(sel).classList.remove('on'));
+      if (typing) e.target.blur();
+      return;
+    }
+    if (typing) return;
+
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === '=' || e.key === '+') { e.preventDefault(); $('#btnFontPlus').click(); return; }
+      if (e.key === '-') { e.preventDefault(); $('#btnFontMinus').click(); return; }
+      return;
+    }
+
     if (e.key === '1') switchView('annotated');
     if (e.key === '2') switchView('original');
     if (e.key === '3') switchView('revised');
     if (e.key === '4') switchView('relayout');
     if (e.key === '5') switchView('images');
+    if (e.key === '/') { e.preventDefault(); $('#annSearch').focus(); return; }
+    if (e.key === '?') { e.preventDefault(); $('#keysMask').classList.add('on'); return; }
+
+    const k = e.key.toLowerCase();
+    if (k === 'j') { e.preventDefault(); stepAnn(1); return; }
+    if (k === 'k') { e.preventDefault(); stepAnn(-1); return; }
+    if (k === 'a' && S.active) { e.preventDefault(); setStatus(S.active, 'accepted'); return; }
+    if (k === 'r' && S.active) { e.preventDefault(); setStatus(S.active, 'rejected'); return; }
     if (e.key === 'Enter' && S.active) setStatus(S.active, 'accepted');
     if (e.key === 'Delete' && S.active) setStatus(S.active, 'rejected');
   });
+}
+
+/* 在「当前可见的批注」里上下移动选中项 */
+function stepAnn(dir) {
+  if (!S.p || !S.p.anns || !S.p.anns.length) return;
+  const list = S.p.anns.filter(a => matchAnn(a, { status: S.filter, sev: S.sev, q: S.q }));
+  if (!list.length) return;
+  let i = list.findIndex(a => a.id === S.active);
+  i = i < 0 ? (dir > 0 ? 0 : list.length - 1) : (i + dir + list.length) % list.length;
+  const target = list[i];
+  // 目标可能落在「还没加载」的那一页，先把页码调到它所在的页
+  const pos = S.p.anns.findIndex(a => a.id === target.id);
+  const visibleIdx = S.p.anns
+    .filter(a => matchAnn(a, { status: S.filter, sev: S.sev, q: S.q }))
+    .findIndex(a => a.id === target.id);
+  S.page = Math.max(1, Math.ceil((visibleIdx + 1) / PAGE_SIZE));
+  renderAnns();
+  activate(target.id, true);
+  void pos;
+}
+
+function openLightbox(src, cap) {
+  $('#lbImg').src = src;
+  $('#lbCap').textContent = cap || '';
+  $('#lightbox').classList.add('on');
 }
 
 /* ────────────────────────────── 导入 ────────────────────────────── */
@@ -491,12 +577,30 @@ function handlePayload(r) {
   $('#paper').style.display = '';
   $('#btnReview').disabled = false;
   $('#btnReviewTxt').textContent = (r.anns && r.anns.length) ? '重新审查' : '开始 AI 审查';
-  if (first) S.histKind = null;
+  if (first) {
+    // 换了一份文档：清掉上一份的筛选与选中，避免「搜到的其实是旧批注」
+    S.histKind = null;
+    S.page = 1;
+    S.active = null;
+    S.q = '';
+    S.filter = 'all';
+    S.sev = 'all';
+    S.imgPage = 1;
+    if ($('#annSearch')) $('#annSearch').value = '';
+    $$('#rbFilter .chip').forEach(x => x.classList.toggle('active', x.dataset.f === 'all'));
+    $$('#rbSev .chip').forEach(x => x.classList.toggle('active', x.dataset.s === 'all'));
+  }
   renderAll();
   updateHistBar(r);
   if (first) switchView('annotated');
   if (r.error) toast(r.error, 'err');
-  if (r.reviewed) toast(`审查完成，共 ${r.anns.length} 条批注，用时 ${r.elapsed}s`, 'ok');
+  if (r.reviewed) {
+    toast(r.canceled
+      ? `已停止审查，保留 ${r.anns.length} 条批注`
+      : `审查完成，共 ${r.anns.length} 条批注，用时 ${r.elapsed}s`,
+      r.canceled ? '' : 'ok');
+  }
+  (r.warnings || []).forEach(w => toast(w, 'err'));
 }
 
 /* ────────────────────────────── 渲染 ────────────────────────────── */
@@ -541,13 +645,6 @@ function renderDocInfo() {
     <div class="row"><span>段落</span><span>${d.blocks}</span></div>
     <div class="row"><span>图片</span><span>${d.images}</span></div>
     <div class="row"><span>批注</span><span>${S.p.stats.total}</span></div>`;
-}
-
-function fmtDur(sec) {
-  sec = Math.max(0, Math.round(Number(sec) || 0));
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  const pad = n => String(n).padStart(2, '0');
-  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 function renderToc() {
@@ -698,6 +795,8 @@ function renderDoc() {
 }
 
 /* ────────────────────────── 图像审查视图 ────────────────────────── */
+const IMG_PAGE = 40;
+
 function renderImages(paper, docId, am) {
   const ir = S.p.imageReport || { items: [] };
   const items = ir.items || [];
@@ -708,11 +807,13 @@ function renderImages(paper, docId, am) {
     return;
   }
   const flagged = items.filter(it => it.sensitive || it.inconsistent || it.needs_check);
+  const pg = paginate(items, S.imgPage, IMG_PAGE);
+  S.imgPage = pg.page;
   let html = `<div class="img-report-head">
     <div class="irh-title">图像审查 <span class="badge-soft">${ir.total || items.length}</span></div>
-    <div class="irh-sub">${esc(ir.note || '')}　待核对 ${flagged.length} 张</div>
+    <div class="irh-sub">${esc(ir.note || '')}　待核对 ${flagged.length} 张　显示 ${pg.shown}/${pg.total}</div>
   </div><div class="img-grid">`;
-  items.forEach(it => {
+  pg.items.forEach(it => {
     const flags = [];
     if (it.sensitive) flags.push(['含敏感信息', '#ef4444']);
     if (it.inconsistent) flags.push(['与正文不一致', '#f97316']);
@@ -721,8 +822,9 @@ function renderImages(paper, docId, am) {
       `<span class="img-flag" style="background:${c}22;color:${c}">${esc(t)}</span>`).join('');
     const note = [it.sensitive_note, it.inconsistent_note, it.check_note]
       .filter(Boolean).map(esc).join('；');
+    const src = `/assets/${docId}/${encodeURIComponent(it.file)}`;
     html += `<div class="img-card${flags.length ? ' flagged' : ''}">
-      <div class="img-thumb"><img src="/assets/${docId}/${encodeURIComponent(it.file)}" loading="lazy" alt=""></div>
+      <div class="img-thumb"><img src="${src}" loading="lazy" alt="${esc(it.caption || '')}"></div>
       <div class="img-meta">
         <div class="img-cap"><b>图${it.index}</b> ${esc(it.caption || '')}</div>
         <div class="img-pos">${esc(it.position || '')}${it.kind ? ' · ' + esc(it.kind) : ''}</div>
@@ -733,110 +835,81 @@ function renderImages(paper, docId, am) {
     </div>`;
   });
   html += '</div>';
+  if (pg.hasMore) {
+    html += `<button class="load-more" id="btnMoreImg">加载更多图片（已显示 ${pg.shown}/${pg.total}）</button>`;
+  }
   paper.innerHTML = html;
+  const more = $('#btnMoreImg');
+  if (more) more.onclick = () => { S.imgPage += 1; renderDoc(); };
 }
 
-/* 字符级 diff：把「改前 → 改后」收敛到真正变化的那几个字上 */
-function lcsOps(a, b) {
-  const n = a.length, m = b.length;
-  if (n * m > 250000) return null;            // 太长就不做 diff
-  const dp = new Array(n + 1);
-  for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1
-        : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const ops = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { ops.push(['=', a[i]]); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(['-', a[i]]); i++; }
-    else { ops.push(['+', b[j]]); j++; }
-  }
-  while (i < n) { ops.push(['-', a[i]]); i++; }
-  while (j < m) { ops.push(['+', b[j]]); j++; }
-  return ops;
-}
-
-function diffHtml(oldS, newS) {
-  const ops = lcsOps(oldS, newS);
-  if (!ops) {
-    return `<span class="d-old">${esc(oldS)}</span>
-            <span style="color:var(--txt-3);margin:0 3px">→</span>
-            <span class="d-new">${esc(newS)}</span>`;
-  }
-  // 合并连续同类操作，并把「删+增」相邻块视为替换
-  const runs = [];
-  for (const [t, ch] of ops) {
-    const last = runs[runs.length - 1];
-    if (last && last.t === t) last.s += ch;
-    else runs.push({ t, s: ch });
-  }
-  let html = '', ctx = '';
-  for (const r of runs) {
-    if (r.t === '=') { ctx += r.s; continue; }
-    if (ctx) {
-      // 只保留变化点前后少量上下文，长句不刷屏
-      const head = ctx.length > 14 ? '…' + ctx.slice(-14) : ctx;
-      html += esc(head);
-      ctx = '';
-    }
-    if (r.t === '-') html += `<span class="d-old">${esc(r.s)}</span>`;
-    else html += `<span class="d-new">${esc(r.s)}</span>`;
-  }
-  if (ctx) {
-    const tail = ctx.length > 14 ? ctx.slice(0, 14) + '…' : ctx;
-    html += esc(tail);
-  }
-  return html;
-}
+/* 字符级 diff 与格式化都在 lib.js：esc / fmtBytes / fmtDur / lcsOps / diffHtml */
 
 function renderAnns() {
   const p = S.p;
   const box = $('#annList');
   if (!p || !p.anns || !p.anns.length) {
     box.innerHTML = '<div class="empty-mini pad">还没有批注。点击「开始 AI 审查」。</div>';
+    updateAnnFoot(0, 0);
     return;
   }
-  let list = p.anns;
-  if (S.filter !== 'all') list = list.filter(a => a.status === S.filter);
+  const all = p.anns;
+  const list = all.filter(a => matchAnn(a, { status: S.filter, sev: S.sev, q: S.q }));
   if (!list.length) {
-    box.innerHTML = '<div class="empty-mini pad">该分类下没有批注。</div>';
+    const why = (S.q || S.sev !== 'all')
+      ? '没有匹配的批注，试试换个关键词或清空筛选。'
+      : '该分类下没有批注。';
+    box.innerHTML = `<div class="empty-mini pad">${esc(why)}</div>`;
+    updateAnnFoot(0, all.length);
     return;
   }
-  const idxOf = id => p.anns.findIndex(x => x.id === id) + 1;
-  box.innerHTML = list.map(a => {
-    const cls = TYPE_CLS[a.type] || 'expr';
-    const c = TYPE_COLOR[cls];
-    let diff = '';
-    if (a.op === 'comment') {
-      diff = `<div style="color:var(--txt-2)">${esc((a.target || '').slice(0, 120))}</div>`;
-    } else if (a.op === 'insert_after') {
-      diff = `<div class="d-plus">＋ ${esc(a.replacement)}</div>`;
-    } else {
-      diff = diffHtml(a.target || '', a.replacement || '');
-    }
-    return `<div class="ann-card ${a.status} ${S.active === a.id ? 'active' : ''}" data-id="${a.id}"
-                 style="border-left-color:${c}">
-      <div class="ac-top">
-        <span class="type-badge" style="background:${c}22;color:${c}">${esc(a.type)}</span>
-        <span class="ann-idx">#${idxOf(a.id)}</span>
-        <i class="sev-dot ${a.severity}"></i>
-      </div>
-      <div class="ac-diff">${diff}</div>
-      ${a.reason ? `<div class="ac-reason">${esc(a.reason)}</div>` : ''}
-      <div class="ac-btns">
-        <button class="yes ${a.status === 'accepted' ? 'on-yes' : ''}" data-act="yes">
-          ${a.status === 'accepted' ? '✓ 已保留' : '保留'}
-        </button>
-        <button class="no ${a.status === 'rejected' ? 'on-no' : ''}" data-act="no">
-          ${a.status === 'rejected' ? '✕ 已丢弃' : '丢弃'}
-        </button>
-      </div>
-    </div>`;
-  }).join('');
+  const pg = paginate(list, S.page, PAGE_SIZE);
+  S.page = pg.page;
+  const idxOf = id => all.findIndex(x => x.id === id) + 1;
+  box.innerHTML = pg.items.map(a => annCardHtml(a, idxOf)).join('')
+    + (pg.hasMore
+      ? `<button class="load-more" id="btnLoadMore">加载更多（已显示 ${pg.shown}/${pg.total}）</button>`
+      : '');
+  updateAnnFoot(pg.shown, all.length);
+  const more = $('#btnLoadMore');
+  if (more) more.onclick = () => { S.page += 1; renderAnns(); };
+}
+
+function updateAnnFoot(shown, total) {
+  const el = $('#annFoot');
+  if (!el) return;
+  el.textContent = total ? `显示 ${shown} / ${total} 条` : '';
+}
+
+function annCardHtml(a, idxOf) {
+  const cls = TYPE_CLS[a.type] || 'expr';
+  const c = TYPE_COLOR[cls];
+  let diff = '';
+  if (a.op === 'comment') {
+    diff = `<div style="color:var(--txt-2)">${esc((a.target || '').slice(0, 120))}</div>`;
+  } else if (a.op === 'insert_after') {
+    diff = `<div class="d-plus">＋ ${esc(a.replacement)}</div>`;
+  } else {
+    diff = diffHtml(a.target || '', a.replacement || '');
+  }
+  return `<div class="ann-card ${a.status} ${S.active === a.id ? 'active' : ''}" data-id="${a.id}"
+               style="border-left-color:${c}">
+    <div class="ac-top">
+      <span class="type-badge" style="background:${c}22;color:${c}">${esc(a.type)}</span>
+      <span class="ann-idx">#${idxOf(a.id)}</span>
+      <i class="sev-dot ${a.severity}" title="${esc(a.severity)}"></i>
+    </div>
+    <div class="ac-diff">${diff}</div>
+    ${a.reason ? `<div class="ac-reason">${esc(a.reason)}</div>` : ''}
+    <div class="ac-btns">
+      <button class="yes ${a.status === 'accepted' ? 'on-yes' : ''}" data-act="yes">
+        ${a.status === 'accepted' ? '✓ 已保留' : '保留'}
+      </button>
+      <button class="no ${a.status === 'rejected' ? 'on-no' : ''}" data-act="no">
+        ${a.status === 'rejected' ? '✕ 已丢弃' : '丢弃'}
+      </button>
+    </div>
+  </div>`;
 }
 
 /* ────────────────────────────── 交互 ────────────────────────────── */
@@ -908,16 +981,49 @@ async function bulk(action) {
 }
 
 /* ────────────────────────────── 审查 ────────────────────────────── */
+let _tickTimer = null;
+
+function startTicker() {
+  S.startedAt = Date.now();
+  stopTicker();
+  _tickTimer = setInterval(() => {
+    const el = $('#progressTxt');
+    if (!el || !S.busy) return;
+    const sec = (Date.now() - S.startedAt) / 1000;
+    const pct = parseFloat($('#progressFill').style.width || '0') / 100;
+    el.textContent = progressText(pct, sec, S.lastMsg || '处理中');
+  }, 1000);
+}
+
+function stopTicker() {
+  if (_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
+}
+
 async function doReview() {
   if (!S.p || !S.p.doc) return toast('请先导入文档', 'err');
-  if (S.busy) return;
+
+  // 已经在跑 → 这一下按的是「停止」
+  if (S.busy) {
+    const r = await window.pywebview.api.cancel_review();
+    if (r && r.ok) {
+      $('#btnReviewTxt').textContent = '正在停止…';
+      toast(r.message || '正在停止', '');
+    } else {
+      toast((r && r.error) || '无法取消', 'err');
+    }
+    return;
+  }
+
   S.busy = true;
   const btn = $('#btnReview');
-  btn.disabled = true;
-  $('#btnReviewTxt').textContent = '审查中…';
+  btn.disabled = false;
+  btn.classList.add('running');
+  $('#btnReviewTxt').textContent = '停止审查';
   $('#progressWrap').classList.add('on');
   $('#progressFill').style.width = '2%';
   $('#progressTxt').textContent = '准备中…';
+  S.lastMsg = '准备中';
+  startTicker();
   try {
     const r = await window.pywebview.api.run_review(true);
     if (r.ok === false) toast(r.error, 'err');
@@ -926,7 +1032,9 @@ async function doReview() {
     toast('审查失败：' + e, 'err');
   } finally {
     S.busy = false;
+    stopTicker();
     btn.disabled = false;
+    btn.classList.remove('running');
     $('#btnReviewTxt').textContent = '重新审查';
     setTimeout(() => $('#progressWrap').classList.remove('on'), 600);
   }
@@ -934,8 +1042,11 @@ async function doReview() {
 
 window.__evt = function (evt, data) {
   if (evt === 'progress') {
-    $('#progressFill').style.width = Math.round((data.pct || 0) * 100) + '%';
-    $('#progressTxt').textContent = data.msg || '';
+    const pct = Math.max(0, Math.min(1, data.pct || 0));
+    $('#progressFill').style.width = Math.round(pct * 100) + '%';
+    S.lastMsg = data.msg || '';
+    const sec = S.startedAt ? (Date.now() - S.startedAt) / 1000 : 0;
+    $('#progressTxt').textContent = progressText(pct, sec, S.lastMsg);
   }
 };
 

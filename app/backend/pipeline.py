@@ -238,9 +238,14 @@ def review_document(doc: Dict[str, Any], llm: LLM,
                     on_progress: Callable[[str, float], None] | None = None,
                     report: Dict[str, Any] | None = None,
                     level: str = "normal",
-                    glossary: list | None = None
+                    glossary: list | None = None,
+                    should_stop: Callable[[], bool] | None = None
                     ) -> List[Dict[str, Any]]:
-    """逐块送审。单块失败不会拖垮整篇 —— 失败的分块会记进 report。"""
+    """逐块送审。单块失败不会拖垮整篇 —— 失败的分块会记进 report。
+
+    should_stop 返回 True 时在分块之间停下（用户点了取消），
+    已完成的批注全部保留，不会白跑。
+    """
     blocks = doc["blocks"]
     chunks = _chunk_pieces(_pieces(blocks))
     by_id = {b["id"]: b for b in blocks}
@@ -251,11 +256,15 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     failed: List[Dict[str, Any]] = []
     empty = 0
     dropped = 0
+    canceled = False
     system = _system_review(level, glossary)
     doc_ctx = _doc_context(doc)
     prev_tail = ""
 
     for i, chunk in enumerate(chunks):
+        if should_stop is not None and should_stop():
+            canceled = True
+            break
         if on_progress:
             on_progress(f"正在审查第 {i + 1}/{total} 段…", i / total * 0.9)
         user = (
@@ -314,9 +323,12 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     if report is not None:
         report.update({"chunks": len(chunks), "failed": failed, "empty": empty,
                        "annotations": len(anns), "dropped": dropped,
-                       "conflicts": conflicts, "level": level})
+                       "conflicts": conflicts, "level": level,
+                       "canceled": canceled,
+                       "done_chunks": total if not canceled else i})
     if on_progress:
-        on_progress("正在生成整体归纳…", 0.92)
+        on_progress("已取消，保留已完成的部分" if canceled else "正在生成整体归纳…",
+                    0.92 if not canceled else 0.5)
     return anns
 
 

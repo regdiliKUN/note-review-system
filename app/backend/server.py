@@ -44,9 +44,11 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/assets/"):
             base = self.asset_root
             rel = path[len("/assets/"):]
+            cacheable = True
         else:
             base = self.root
             rel = path.lstrip("/")
+            cacheable = False
         rel = rel.replace("\\", "/")
         # 防目录穿越
         full = os.path.normpath(os.path.join(base, rel))
@@ -65,7 +67,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", MIME.get(ext) or mimetypes.guess_type(full)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=86400")
+        if cacheable:
+            # 图片内容由内容哈希命名，永不变化 → 可以长缓存
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            # 页面与脚本必须每次校验：
+            # 否则升级到新版本后，WebView2 仍会拿缓存里的旧 app.js，
+            # 界面就会「新版后端 + 旧版前端」地错位，甚至整页白屏。
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
         self.end_headers()
         try:
             self.wfile.write(data)
