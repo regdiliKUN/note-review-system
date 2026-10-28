@@ -650,3 +650,54 @@ textarea:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140
   font-size:11.5px;color:#5b6472;background:#f2f6fd;border:1px solid #e2eaf6;
   border-radius:8px;padding:8px 14px;margin-bottom:20px;line-height:1.7;
 }
+
+/* ══════════ 历史增强：搜索 / 备注 / 对比 ══════════ */
+.hist-search{padding:0 0 10px}
+.hist-search input{
+  width:100%;height:30px;padding:0 11px;border-radius:8px;font-size:12px;
+  background:var(--panel-2);border:1px solid var(--border);color:var(--txt);outline:none;
+}
+.hist-search input:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140,255,.12)}
+.hist-search-hint{font-size:11px;color:var(--txt-3);padding:2px 2px 8px}
+
+.hi-note{
+  font-size:11.5px;color:#7dd3fc;background:rgba(14,165,233,.1);
+  border-radius:6px;padding:4px 8px;margin-top:6px;line-height:1.6;
+}
+.hi-note-edit{display:flex;gap:6px;margin-top:8px}
+.hi-note-edit input{
+  flex:1;height:26px;padding:0 9px;border-radius:6px;font-size:12px;
+  background:var(--panel-2);border:1px solid var(--border);color:var(--txt);outline:none;
+}
+.hist-item.picked{border-color:rgba(79,140,255,.55);box-shadow:0 0 0 2px rgba(79,140,255,.15)}
+.hi-acts .mini-btn{height:23px;padding:0 7px;font-size:11px}
+
+/* 对比结果 */
+.hist-cmp{
+  border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:12px;
+  background:var(--panel-2);max-height:280px;overflow-y:auto;
+}
+.cmp-head{display:flex;align-items:center;gap:9px;font-size:12.5px;margin-bottom:9px}
+.cmp-head b{flex:1}
+.cmp-meta{color:var(--txt-3);font-size:11.5px}
+.cmp-stats{display:flex;gap:12px;font-size:11.5px;margin-bottom:9px;flex-wrap:wrap}
+.c-add{color:#4ade80}
+.c-del{color:#f87171}
+.c-same{color:var(--txt-2)}
+.c-meta{color:var(--txt-3)}
+.cmp-sec{font-size:11px;color:var(--txt-3);margin:9px 0 5px;letter-spacing:.4px}
+.cmp-row{display:flex;gap:8px;font-size:11.5px;padding:4px 0;line-height:1.6;
+  border-bottom:1px dashed var(--border-soft)}
+.cmp-row.add .cmp-txt{color:#86efac}
+.cmp-row.del .cmp-txt{color:#fca5a5}
+.cmp-type{color:var(--txt-3);flex:none;min-width:56px}
+.cmp-txt{word-break:break-word}
+
+/* 最近打开：带移除按钮 */
+.rl-item{display:inline-flex;align-items:center;gap:2px;margin:0 6px 6px 0}
+.rl-x{
+  width:18px;height:18px;border-radius:5px;font-size:10px;color:var(--txt-3);
+  display:grid;place-items:center;opacity:0;transition:.15s;
+}
+.rl-item:hover .rl-x{opacity:1}
+.rl-x:hover{background:rgba(239,68,68,.18);color:#f87171}

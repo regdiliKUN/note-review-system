@@ -102,6 +102,7 @@ class Api:
             "video_max_frames": 12,
             "history_dir": "",
             "history_keep": 8,
+            "history_keep_days": 0,
             "review_level": "normal",
             "glossary": [],
             "relayout": dict(RELAYOUT_DEFAULTS),
@@ -190,6 +191,15 @@ class Api:
             n = docmodel.prune_assets(self.asset_root, keep=40)
             if n:
                 self._log(f"已清理 {n} 个历史图片目录")
+        except Exception:
+            pass
+        # 按天数自动清理旧历史（默认关闭，用户在设置里开启）
+        try:
+            days = int(self.cfg.get("history_keep_days") or 0)
+            if days > 0:
+                n = self.history.prune_older_than(days)
+                if n:
+                    self._log(f"已清理 {n} 条超过 {days} 天的历史记录")
         except Exception:
             pass
         llm = self._llm()
@@ -656,6 +666,52 @@ class Api:
             return {"ok": True, "dir": d}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def history_set_note(self, entry_id: str, note: str) -> dict:
+        """给一次审查加备注，方便日后分辨「哪次是我改完之后的」。"""
+        if not self.doc:
+            return {"ok": False, "error": "请先导入文档"}
+        ok = self.history.set_note(self.doc["path"], entry_id, note)
+        if not ok:
+            return {"ok": False, "error": "这条历史记录不存在"}
+        return self._payload(extra={"noteSaved": entry_id})
+
+    def history_compare(self, id_a: str, id_b: str) -> dict:
+        """对比两次审查的批注差异。"""
+        if not self.doc:
+            return {"ok": False, "error": "请先导入文档"}
+        r = self.history.compare(self.doc["path"], id_a, id_b)
+        if not r:
+            return {"ok": False, "error": "对比失败：至少有一条记录不存在或已损坏"}
+        return {"ok": True, **r}
+
+    def history_search(self, q: str = "") -> dict:
+        """跨文件搜索审查记录。"""
+        try:
+            items = self.history.search(q, limit=100)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "items": items, "query": q}
+
+    def history_prune(self, days: int = 0) -> dict:
+        """清理超过 N 天的历史。days=0 时按配置 history_keep_days。"""
+        d = int(days or self.cfg.get("history_keep_days") or 0)
+        if d <= 0:
+            return {"ok": False, "error": "请指定要保留的天数（例如 90）"}
+        n = self.history.prune_older_than(d)
+        return {"ok": True, "removed": n, "days": d, "history": self.history_info()}
+
+    # ------------------------------------------------------------ 最近打开
+    def recent_remove(self, path: str) -> dict:
+        rec = [p for p in self.cfg.get("recent", []) if p != path]
+        self.cfg["recent"] = rec
+        self._save_cfg()
+        return {"ok": True, "recent": rec[:12]}
+
+    def recent_clear(self) -> dict:
+        self.cfg["recent"] = []
+        self._save_cfg()
+        return {"ok": True, "recent": []}
 
     # ------------------------------------------------------------ 视图数据
     def _ser_blocks(self, blocks, anns, mode):

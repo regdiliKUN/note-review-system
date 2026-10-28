@@ -21,6 +21,7 @@ const S = {
   relayout: false,
   hist: null,
   histKind: null,
+  cmp: [],
   fontSize: 0,          // -2..+4，作用在 .paper 的字号上
   startedAt: 0,
   lastMsg: '',
@@ -159,16 +160,29 @@ function renderRecent(list) {
   const box = $('#recentBox');
   if (!list.length) { box.innerHTML = ''; return; }
   box.innerHTML = '<div class="rl-title">最近打开</div>' + list.map(p =>
-    `<button data-p="${esc(p)}" title="${esc(p)}">${esc(p.split(/[\\/]/).pop())}</button>`
+    `<span class="rl-item">
+       <button data-p="${esc(p)}" title="${esc(p)}">${esc(p.split(/[\\/]/).pop())}</button>
+       <button class="rl-x" data-rm="${esc(p)}" title="从列表移除">✕</button>
+     </span>`
   ).join('');
-  $$('#recentBox button').forEach(b => b.onclick = async () => {
+  $$('#recentBox [data-p]').forEach(b => b.onclick = async () => {
     const r = await window.pywebview.api.load_recent(b.dataset.p);
     handlePayload(r);
+  });
+  $$('#recentBox [data-rm]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    const r = await window.pywebview.api.recent_remove(b.dataset.rm);
+    if (r && r.ok) {
+      renderRecent(r.recent || []);
+      toast('已从最近列表移除', '');
+    }
   });
 }
 
 /* ────────────────────────── 审查历史 ────────────────────────── */
 function openHistory() {
+  S.cmp = [];
+  $('#histCmp').style.display = 'none';
   renderHistory();
   $('#historyMask').classList.add('on');
 }
@@ -201,18 +215,114 @@ function renderHistory() {
   const curId = (hb.current && hb.current.id) || null;
   list.innerHTML = ents.map(e => {
     const isCur = e.id === curId;
-    return `<div class="hist-item${isCur ? ' cur' : ''}">
+    const picked = (S.cmp || []).includes(e.id);
+    const note = e.note
+      ? `<div class="hi-note">📝 ${esc(e.note)}</div>`
+      : '';
+    return `<div class="hist-item${isCur ? ' cur' : ''}${picked ? ' picked' : ''}" data-hid="${esc(e.id)}">
       <div class="hi-main">
         <div class="hi-top"><b>${esc(e.ts || e.id)}</b>${isCur ? '<span class="hi-tag">当前展示</span>' : ''}</div>
         <div class="hi-sub">批注 ${e.anns || 0} 条 · 图片 ${e.images || 0} 张${e.analyzed ? `（已识别 ${e.analyzed}）` : ''} · 用时 ${e.elapsed || 0}s</div>
         <div class="hi-sub dim">模型 ${esc(e.model || '—')}${e.vision ? ' · 视觉 ' + esc(e.vision) : ''}</div>
+        ${note}
       </div>
       <div class="hi-acts">
         <button class="mini-btn ok" data-hload="${esc(e.id)}">${isCur ? '重新载入' : '载入'}</button>
+        <button class="mini-btn" data-hcmp="${esc(e.id)}" title="选中两条即可对比">对比</button>
+        <button class="mini-btn" data-hnote="${esc(e.id)}" title="加一句备注">备注</button>
         <button class="mini-btn no" data-hdel="${esc(e.id)}">删除</button>
       </div>
     </div>`;
   }).join('');
+}
+
+/* 备注编辑：行内输入，避免依赖 WebView 里不可靠的 prompt() */
+function editNote(entryId) {
+  const row = $(`.hist-item[data-hid="${entryId}"]`);
+  if (!row) return;
+  const old = (S.p.history.entries.find(e => e.id === entryId) || {}).note || '';
+  const box = document.createElement('div');
+  box.className = 'hi-note-edit';
+  box.innerHTML = `<input type="text" maxlength="200" value="${esc(old)}"
+      placeholder="例如：改完错别字后的版本">
+    <button class="mini-btn ok" data-save="1">保存</button>
+    <button class="mini-btn" data-cancel="1">取消</button>`;
+  row.appendChild(box);
+  const inp = box.querySelector('input');
+  inp.focus(); inp.select();
+  const close = () => box.remove();
+  box.querySelector('[data-cancel]').onclick = close;
+  box.querySelector('[data-save]').onclick = async () => {
+    const r = await window.pywebview.api.history_set_note(entryId, inp.value);
+    if (r.ok === false) return toast(r.error || '保存失败', 'err');
+    handlePayload(r);
+    renderHistory();
+    toast('备注已保存', 'ok');
+  };
+  inp.onkeydown = e => {
+    if (e.key === 'Enter') box.querySelector('[data-save]').click();
+    if (e.key === 'Escape') close();
+    e.stopPropagation();
+  };
+}
+
+async function compareSelected() {
+  const ids = S.cmp || [];
+  if (ids.length !== 2) return toast('请选中两条记录再对比', 'err');
+  const r = await window.pywebview.api.history_compare(ids[0], ids[1]);
+  if (r.ok === false) return toast(r.error || '对比失败', 'err');
+  const box = $('#histCmp');
+  const annHtml = (a, cls) => `<div class="cmp-row ${cls}">
+      <span class="cmp-type">${esc(a.type || '')}</span>
+      <span class="cmp-txt">${esc((a.replacement || a.reason || '').slice(0, 90))}</span>
+    </div>`;
+  box.innerHTML = `
+    <div class="cmp-head">
+      <b>对比结果</b>
+      <span class="cmp-meta">${esc(r.a.ts)} → ${esc(r.b.ts)}</span>
+      <button class="icon-btn" id="btnCloseCmp">✕</button>
+    </div>
+    <div class="cmp-stats">
+      <span class="c-add">新增 ${r.added.length}</span>
+      <span class="c-del">消失 ${r.removed.length}</span>
+      <span class="c-same">相同 ${r.same}</span>
+      <span class="c-meta">批注 ${r.a.anns} → ${r.b.anns}</span>
+    </div>
+    ${r.added.length ? `<div class="cmp-sec">这次新挑出来的</div>${r.added.map(a => annHtml(a, 'add')).join('')}` : ''}
+    ${r.removed.length ? `<div class="cmp-sec">上次有、这次没有的</div>${r.removed.map(a => annHtml(a, 'del')).join('')}` : ''}
+    ${!r.added.length && !r.removed.length ? '<div class="empty-mini pad">两次审查的批注完全一致。</div>' : ''}`;
+  box.style.display = '';
+  $('#btnCloseCmp').onclick = () => { box.style.display = 'none'; };
+}
+
+/* 跨文件搜索结果 */
+function renderHistorySearch(items, q) {
+  const list = $('#histList');
+  $('#histCount').textContent = items.length;
+  $('#histCmp').style.display = 'none';
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-mini pad">没有找到包含「${esc(q)}」的审查记录。</div>`;
+    return;
+  }
+  list.innerHTML = `<div class="hist-search-hint">跨文件搜索结果（点「打开」会先导入该文件）</div>`
+    + items.map(e => `<div class="hist-item">
+      <div class="hi-main">
+        <div class="hi-top"><b>${esc(e.name || '')}</b><span class="hi-tag">${esc(e.ts || '')}</span></div>
+        <div class="hi-sub">批注 ${e.anns || 0} 条 · 用时 ${e.elapsed || 0}s · 模型 ${esc(e.model || '—')}</div>
+        ${e.note ? `<div class="hi-note">📝 ${esc(e.note)}</div>` : ''}
+        <div class="hi-sub dim" title="${esc(e.file || '')}">${esc((e.file || '').slice(0, 80))}</div>
+      </div>
+      <div class="hi-acts">
+        <button class="mini-btn ok" data-hopen="${esc(e.file || '')}">打开</button>
+      </div>
+    </div>`).join('');
+  $$('#histList [data-hopen]').forEach(b => b.onclick = async () => {
+    const p = b.dataset.hopen;
+    if (!p) return toast('这条记录缺少文件路径', 'err');
+    const r = await window.pywebview.api.load_recent(p);
+    handlePayload(r);
+    if (r && r.ok !== false) $('#historyMask').classList.remove('on');
+  });
 }
 
 /* 顶部提示条：自动载入 / 刚保存 / 文件已改动 */
@@ -374,6 +484,21 @@ function wire() {
   $('#histList').addEventListener('click', async e => {
     const ld = e.target.closest('[data-hload]');
     const dl = e.target.closest('[data-hdel]');
+    const cp = e.target.closest('[data-hcmp]');
+    const nt = e.target.closest('[data-hnote]');
+    if (nt) { editNote(nt.dataset.hnote); return; }
+    if (cp) {
+      const id = cp.dataset.hcmp;
+      const i = S.cmp.indexOf(id);
+      if (i >= 0) S.cmp.splice(i, 1);
+      else {
+        if (S.cmp.length >= 2) S.cmp.shift();
+        S.cmp.push(id);
+      }
+      renderHistory();
+      if (S.cmp.length === 2) compareSelected();
+      return;
+    }
     if (ld) {
       const r = await window.pywebview.api.history_load(ld.dataset.hload);
       if (r.ok === false) return toast(r.error || '载入失败', 'err');
@@ -393,6 +518,19 @@ function wire() {
       toast('已删除', 'ok');
     }
   });
+
+  // 跨文件搜索历史
+  let hTimer = null;
+  $('#histSearch').oninput = e => {
+    clearTimeout(hTimer);
+    const q = e.target.value;
+    hTimer = setTimeout(async () => {
+      if (!q.trim()) { renderHistory(); return; }
+      const r = await window.pywebview.api.history_search(q);
+      if (!r || r.ok === false) return;
+      renderHistorySearch(r.items || [], q);
+    }, 200);
+  };
   $('#histBar').addEventListener('click', e => {
     const b = e.target.closest('[data-act]');
     if (!b) return;

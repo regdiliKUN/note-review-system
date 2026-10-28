@@ -174,7 +174,126 @@ class HistoryStore:
             "elapsed": snap.get("elapsed") or 0,
             "file_size": snap.get("file_size") or 0,
             "file_mtime": snap.get("file_mtime") or 0,
+            "note": snap.get("note") or "",
         }
+
+    def set_note(self, path: str, entry_id: str, note: str) -> bool:
+        """给某次审查加一句备注（"改完错别字后的版本"）。"""
+        snap = self.read(path, entry_id)
+        if not isinstance(snap, dict):
+            return False
+        snap["note"] = (note or "").strip()[:200]
+        _atomic_write_json(self.snap_path(path, entry_id), snap)
+        m = self.meta(path)
+        for e in m.get("entries", []):
+            if e.get("id") == entry_id:
+                e["note"] = snap["note"]
+        _atomic_write_json(self.meta_path(path), m)
+        return True
+
+    def compare(self, path: str, id_a: str, id_b: str) -> dict:
+        """对比两次审查：哪些批注是新出现的、哪些消失了、哪些没变。
+
+        用途：改完一轮错别字再跑一次，看看「这次 AI 又挑出了什么」，
+        或者确认「上次的问题是不是都改掉了」。
+        """
+        a = self.read(path, id_a) or {}
+        b = self.read(path, id_b) or {}
+        if not a or not b:
+            return {}
+
+        def key(x):
+            return (x.get("block_id"), x.get("sid"), x.get("type"),
+                    (x.get("replacement") or "")[:120])
+
+        sa = {}
+        for x in (a.get("anns") or []):
+            sa.setdefault(key(x), x)
+        sb = {}
+        for x in (b.get("anns") or []):
+            sb.setdefault(key(x), x)
+
+        added = [sb[k] for k in sb if k not in sa]
+        removed = [sa[k] for k in sa if k not in sb]
+        same = sum(1 for k in sa if k in sb)
+
+        def brief(snap):
+            ir = snap.get("image_report") or {}
+            return {
+                "id": snap.get("id") or "",
+                "ts": snap.get("ts") or "",
+                "model": snap.get("model") or "",
+                "elapsed": snap.get("elapsed") or 0,
+                "anns": len(snap.get("anns") or []),
+                "images": ir.get("total") or 0,
+                "summary": (snap.get("summary") or {}).get("summary", "")[:200],
+                "note": snap.get("note") or "",
+            }
+
+        return {"a": brief(a), "b": brief(b), "added": added[:80],
+                "removed": removed[:80], "same": same}
+
+    def search(self, q: str, limit: int = 80) -> list:
+        """跨文件搜索审查记录（文件名 / 时间 / 备注 / 模型）。"""
+        q = (q or "").strip().lower()
+        out = []
+        try:
+            names = os.listdir(self.root)
+        except Exception:
+            return []
+        for fn in names:
+            d = os.path.join(self.root, fn)
+            if not os.path.isdir(d):
+                continue
+            m = _read_json(os.path.join(d, "meta.json")) or {}
+            name = m.get("name") or fn
+            path = m.get("path") or ""
+            for e in m.get("entries") or []:
+                if not isinstance(e, dict):
+                    continue
+                blob = " ".join(str(e.get(k) or "") for k in ("ts", "note", "model")).lower()
+                blob += " " + str(name).lower()
+                if q and q not in blob:
+                    continue
+                out.append({"file": path, "name": name, **e})
+        out.sort(key=lambda x: x.get("epoch") or 0, reverse=True)
+        return out[:limit]
+
+    def prune_older_than(self, days: int) -> int:
+        """删除超过 N 天的快照。返回删除条数。"""
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        removed = 0
+        try:
+            names = os.listdir(self.root)
+        except Exception:
+            return 0
+        for fn in names:
+            d = os.path.join(self.root, fn)
+            if not os.path.isdir(d):
+                continue
+            mp = os.path.join(d, "meta.json")
+            m = _read_json(mp)
+            if not isinstance(m, dict):
+                continue
+            ents = m.get("entries") or []
+            keep = []
+            for e in ents:
+                if (e.get("epoch") or 0) and (e.get("epoch") or 0) < cutoff:
+                    try:
+                        os.remove(os.path.join(d, f"{e['id']}.json"))
+                    except Exception:
+                        pass
+                    removed += 1
+                else:
+                    keep.append(e)
+            if len(keep) != len(ents):
+                m["entries"] = keep
+                _atomic_write_json(mp, m)
+        if removed:
+            self._sum_cache = None
+        return removed
 
     def save(self, path: str, snapshot: dict) -> dict:
         """写入一次审查快照，并刷新索引、按 keep 修剪。"""

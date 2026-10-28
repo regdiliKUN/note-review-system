@@ -1770,5 +1770,106 @@ class TestPerformanceBehaviour(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 历史增强
+class TestHistoryAdvanced(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nr_h2_")
+        self.store = history.HistoryStore(self.tmp, keep=10)
+        self.p = os.path.join(self.tmp, "笔记.docx")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ann(self, bid, sid, repl, typ="表达优化"):
+        return {"block_id": bid, "sid": sid, "type": typ,
+                "replacement": repl, "reason": "r", "status": "pending"}
+
+    def test_set_note(self):
+        e = self.store.save(self.p, {"anns": []})
+        self.assertTrue(self.store.set_note(self.p, e["id"], "改完错别字的版本"))
+        ents = self.store.entries(self.p)
+        self.assertEqual(ents[0]["note"], "改完错别字的版本")
+
+    def test_set_note_missing_entry(self):
+        self.assertFalse(self.store.set_note(self.p, "nope", "x"))
+
+    def test_compare_added_removed(self):
+        a = self.store.save(self.p, {"anns": [self._ann("b1", 0, "A"), self._ann("b1", 1, "B")]})
+        b = self.store.save(self.p, {"anns": [self._ann("b1", 0, "A"), self._ann("b2", 0, "C")]})
+        r = self.store.compare(self.p, a["id"], b["id"])
+        self.assertEqual(r["same"], 1)
+        self.assertEqual([x["replacement"] for x in r["added"]], ["C"])
+        self.assertEqual([x["replacement"] for x in r["removed"]], ["B"])
+
+    def test_compare_missing_side(self):
+        e = self.store.save(self.p, {"anns": []})
+        self.assertEqual(self.store.compare(self.p, e["id"], "nope"), {})
+
+    def test_search_across_files(self):
+        p2 = os.path.join(self.tmp, "另一份.docx")
+        e1 = self.store.save(self.p, {"anns": []})
+        self.store.set_note(self.p, e1["id"], "第一次审查")
+        self.store.save(p2, {"anns": []})
+        r = self.store.search("第一次")
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["name"], "笔记.docx")
+
+    def test_search_empty_returns_all(self):
+        self.store.save(self.p, {"anns": []})
+        self.store.save(os.path.join(self.tmp, "b.docx"), {"anns": []})
+        self.assertEqual(len(self.store.search("")), 2)
+
+    def test_prune_older_than(self):
+        old = self.store.save(self.p, {"id": "old1", "epoch": 1000, "anns": []})
+        new = self.store.save(self.p, {"id": "new1", "anns": []})
+        n = self.store.prune_older_than(30)
+        self.assertEqual(n, 1)
+        ids = [e["id"] for e in self.store.entries(self.p)]
+        self.assertIn(new["id"], ids)
+        self.assertNotIn(old["id"], ids)
+
+    def test_prune_zero_days_noop(self):
+        self.store.save(self.p, {"anns": []})
+        self.assertEqual(self.store.prune_older_than(0), 0)
+
+    def test_api_history_note_and_compare(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp(prefix="nr_h3_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            src = os.path.join(tmp, "n.txt")
+            open(src, "w", encoding="utf-8").write("正文。")
+            api.load(src)
+            e1 = api._save_history(1.0)
+            self.assertTrue(api.history_set_note(e1["id"], "第一版")["ok"])
+            e2 = api._save_history(2.0)
+            r = api.history_compare(e1["id"], e2["id"])
+            self.assertTrue(r["ok"])
+            self.assertIn("same", r)
+            self.assertTrue(api.history_search("第一版")["ok"])
+            self.assertFalse(api.history_prune(0)["ok"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_api_recent_management(self):
+        from backend.api import Api
+        tmp = tempfile.mkdtemp(prefix="nr_rec_")
+        try:
+            api = Api(workdir=tmp, get_window=lambda: None,
+                      asset_root=os.path.join(tmp, "assets"))
+            api.set_history_dir(os.path.join(tmp, "hist"))
+            src = os.path.join(tmp, "n.txt")
+            open(src, "w", encoding="utf-8").write("正文。")
+            api.load(src)
+            self.assertIn(src, api.cfg["recent"])
+            self.assertEqual(api.recent_remove(src)["recent"], [])
+            api.load(src)
+            self.assertEqual(api.recent_clear()["recent"], [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
