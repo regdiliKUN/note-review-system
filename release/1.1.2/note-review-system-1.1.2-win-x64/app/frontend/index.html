@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>笔记审查总结系统</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ══════════ 顶栏 ══════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6.5A2.5 2.5 0 0 1 4 18.5z"/>
+          <path d="M8 8h8M8 12h8M8 16h4"/>
+        </svg>
+      </div>
+      <div class="brand-txt">
+        <b>笔记审查总结系统</b>
+        <span>Note Review &amp; Restructure</span>
+      </div>
+    </div>
+
+    <div class="top-actions">
+      <button class="btn btn-primary" id="btnImport" title="导入本地文档（.doc / .docx / .txt / .md）">
+        <!-- 导入 = 向下落入托盘（收进来） -->
+        <svg class="ico ico-import" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3.5v9.4"/>
+          <path d="m7.6 8.6 4.4 4.4 4.4-4.4"/>
+          <path d="M3.6 15.4v2.6A3 3 0 0 0 6.6 21h10.8a3 3 0 0 0 3-3v-2.6"/>
+        </svg>
+        导入文档
+      </button>
+      <button class="btn btn-accent" id="btnReview" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l2.1 4.6 5 .6-3.7 3.4 1 4.9L12 14.9 7.6 16.5l1-4.9L4.9 8.2l5-.6z"/></svg>
+        <span id="btnReviewTxt">开始 AI 审查</span>
+      </button>
+    </div>
+
+    <div class="top-right">
+      <div class="model-pick" id="modelPick" title="选择本地模型">
+        <span class="dot" id="healthDot"></span>
+        <select id="modelSelect"></select>
+      </div>
+      <button class="icon-btn" id="btnHistory" title="审查历史（按文件保存，可回看每次结果）" aria-label="审查历史">
+        <svg class="ico ico-history" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+          <path d="M3 3v5h5"/>
+          <path d="M12 7v5l4 2"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="btnSettings" title="设置（模型 / 视觉模型 / 重排选项）" aria-label="设置">
+        <!-- 完整 8 齿齿轮（原 path 中途截断，只画出半圈波浪线） -->
+        <svg class="ico ico-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ══════════ 主体 ══════════ -->
+  <div class="body">
+
+    <!-- 左：大纲 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="side-sec">
+        <div class="side-head">
+          <span>文档信息</span>
+        </div>
+        <div id="docInfo" class="doc-info">
+          <div class="empty-mini">尚未导入文档</div>
+        </div>
+      </div>
+
+      <div class="side-sec grow">
+        <div class="side-head">
+          <span>大纲</span>
+          <span class="badge-soft" id="tocCount">0</span>
+        </div>
+        <div id="tocList" class="toc-list">
+          <div class="empty-mini">导入后显示</div>
+        </div>
+      </div>
+
+      <div class="side-sec">
+        <div class="side-head"><span>批注分布</span></div>
+        <div id="typeStats" class="type-stats">
+          <div class="empty-mini">—</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 中：文档 -->
+    <main class="main">
+      <div class="viewbar">
+        <div class="tabs" id="viewTabs">
+          <button class="tab active" data-view="annotated">
+            <span class="tab-ico">◉</span> 全部批注
+            <em id="tabAnnCount">0</em>
+          </button>
+          <button class="tab" data-view="original">
+            <span class="tab-ico">▤</span> 原版笔记
+          </button>
+          <button class="tab" data-view="revised">
+            <span class="tab-ico">✓</span> 修正后版本
+          </button>
+          <button class="tab" data-view="relayout">
+            <span class="tab-ico">⧉</span> 重新排版
+            <em class="off" id="tabLayoutOff">未启用</em>
+          </button>
+          <button class="tab" data-view="images">
+            <span class="tab-ico">▧</span> 图像审查
+            <em id="tabImgCount" style="display:none">0</em>
+          </button>
+        </div>
+        <div class="viewbar-right">
+          <div class="progress-wrap" id="progressWrap">
+            <div class="progress-bar"><i id="progressFill"></i></div>
+            <span id="progressTxt">准备中…</span>
+          </div>
+          <label class="switch" title="开启后生成重排版本">
+            <input type="checkbox" id="chkRelayout">
+            <span class="slider"></span>
+            <span class="switch-lbl">重新排版</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="hist-bar" id="histBar" style="display:none"></div>
+
+      <div class="paper-wrap" id="paperWrap">
+        <div class="welcome" id="welcome">
+          <div class="welcome-card">
+            <div class="welcome-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6.5A2.5 2.5 0 0 1 4 18.5z"/>
+                <path d="M8 8h8M8 12h5"/><circle cx="16" cy="15.5" r="3"/><path d="m18.4 18 2 2"/>
+              </svg>
+            </div>
+            <h2>导入一篇笔记，开始审校</h2>
+            <p>支持 Word（.doc / .docx）与 .txt / .md 文档，<b>原文图片按原格式原位完整保留</b>。<br>
+               AI 会逐条给出修改与理由，并对图片逐张说明、标注位置与问题，你可以一条条决定保留还是丢弃。</p>
+            <button class="btn btn-primary btn-lg" id="btnImport2">选择文件</button>
+            <div class="recent" id="recentBox"></div>
+          </div>
+        </div>
+        <div class="paper" id="paper" style="display:none"></div>
+      </div>
+    </main>
+
+    <!-- 右：批注 -->
+    <aside class="rightbar" id="rightbar">
+      <div class="rb-head">
+        <div class="rb-title">
+          批注
+          <span class="badge-soft" id="annTotal">0</span>
+        </div>
+        <div class="rb-actions">
+          <button class="mini-btn ok" id="btnAcceptAll" title="全部保留">全部保留</button>
+          <button class="mini-btn no" id="btnRejectAll" title="全部撤销">全部撤销</button>
+        </div>
+      </div>
+      <div class="rb-filter" id="rbFilter">
+        <button class="chip active" data-f="all">全部</button>
+        <button class="chip" data-f="pending">待处理</button>
+        <button class="chip" data-f="accepted">已保留</button>
+        <button class="chip" data-f="rejected">已丢弃</button>
+      </div>
+      <div class="ann-list" id="annList">
+        <div class="empty-mini pad">还没有批注。点击「开始 AI 审查」。</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ══════════ 底栏 ══════════ -->
+  <footer class="statusbar">
+    <div class="sb-left">
+      <span class="sb-item" id="sbFile">未打开文件</span>
+      <span class="sb-sep"></span>
+      <span class="sb-item"><i class="dot-img"></i><span id="sbImg">0</span> 张图片</span>
+      <span class="sb-sep"></span>
+      <span class="sb-item" id="sbBlocks">0 段</span>
+    </div>
+    <div class="sb-right">
+      <div class="stat-chips" id="statChips"></div>
+      <div class="export-wrap">
+        <button class="btn btn-ghost" id="btnExport">
+          <!-- 导出 = 向上送出托盘（送出去） -->
+        <svg class="ico ico-export" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 15.6V4.6"/>
+          <path d="m7.6 9.2 4.4-4.4 4.4 4.4"/>
+          <path d="M3.6 15.4v2.6A3 3 0 0 0 6.6 21h10.8a3 3 0 0 0 3-3v-2.6"/>
+        </svg>
+          导出
+        </button>
+        <div class="menu" id="exportMenu">
+          <div class="menu-head">导出为</div>
+          <button data-fmt="docx" data-kind="revised">Word · 修正后版本</button>
+          <button data-fmt="docx" data-kind="relayout">Word · 重排版版本</button>
+          <button data-fmt="docx" data-kind="original">Word · 原版笔记</button>
+          <div class="menu-sep"></div>
+          <button data-fmt="html" data-kind="revised">网页 · 修正后版本</button>
+          <button data-fmt="html" data-kind="relayout">网页 · 重排版版本</button>
+          <div class="menu-sep"></div>
+          <button data-fmt="md" data-kind="revised">Markdown · 修正后版本</button>
+          <button data-fmt="txt" data-kind="revised">纯文本 · 修正后版本</button>
+        </div>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<!-- 设置弹层 -->
+<div class="modal-mask" id="settingsMask">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>设置</h3>
+      <button class="icon-btn" id="btnCloseSettings">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>模型来源</label>
+        <div class="seg" id="provSeg">
+          <button data-p="ollama" class="active">本机 Ollama</button>
+          <button data-p="openai">OpenAI 兼容 API</button>
+        </div>
+      </div>
+      <div class="field" id="fieldBase">
+        <label>服务地址</label>
+        <input type="text" id="inpBase" placeholder="http://127.0.0.1:11434">
+      </div>
+      <div class="field" id="fieldKey" style="display:none">
+        <label>API Key</label>
+        <input type="password" id="inpKey" placeholder="sk-...">
+      </div>
+      <div class="field">
+        <label>模型名称</label>
+        <input type="text" id="inpModel" placeholder="qwen3:8b">
+        <div class="hint" id="modelHint"></div>
+      </div>
+      <div class="field">
+        <label>视觉模型（用于图片理解，可留空）</label>
+        <input type="text" id="inpVision" placeholder="如 qwen2.5vl:7b / llava / minicpm-v / gpt-4o">
+        <div class="hint">留空则尝试沿用上面的模型；不支持视觉时会自动降级为「需人工核对」，不会丢图。</div>
+      </div>
+      <div class="field">
+        <label>审查历史目录</label>
+        <div class="hist-dir-row">
+          <input type="text" id="inpHistDir" readonly>
+          <button class="btn btn-ghost btn-sm" id="btnOpenHistDir2">打开文件夹</button>
+        </div>
+        <div class="hint" id="histDirHint">每次审查完成后自动保存；再次打开同一文件会直接载入，不重复调用模型。</div>
+      </div>
+      <div class="field">
+        <label>重排选项</label>
+        <div class="checks">
+          <label class="ck"><input type="checkbox" data-opt="add_toc"> 生成目录</label>
+          <label class="ck"><input type="checkbox" data-opt="number_headings"> 标题自动编号</label>
+          <label class="ck"><input type="checkbox" data-opt="merge_lines"> 合并断行</label>
+          <label class="ck"><input type="checkbox" data-opt="normalize_text"> 规整空白标点</label>
+          <label class="ck"><input type="checkbox" data-opt="add_summary"> 顶部加内容提要</label>
+          <label class="ck"><input type="checkbox" data-opt="ensure_heading"> 补齐标题层级</label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="btnTestConn">测试连接</button>
+      <button class="btn btn-primary" id="btnSaveSettings">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 审查历史弹层 -->
+<div class="modal-mask" id="historyMask">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h3>审查历史</h3>
+      <button class="icon-btn" id="btnCloseHistory">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="hist-loc">
+        <div class="hl-row">
+          <span class="hl-label">存储位置</span>
+          <span class="hl-path" id="histPath">—</span>
+        </div>
+        <div class="hl-actions">
+          <button class="btn btn-ghost btn-sm" id="btnOpenHistDir">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2l2 2.5h7.8A2.5 2.5 0 0 1 21 10v7.5A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/>
+            </svg>
+            打开文件夹
+          </button>
+          <button class="btn btn-ghost btn-sm" id="btnChooseHistDir">更改目录</button>
+        </div>
+        <div class="hl-meta" id="histMeta"></div>
+        <div class="hl-warn" id="histWarn" style="display:none"></div>
+      </div>
+
+      <div class="hist-head">
+        <span>当前文件的审查记录</span>
+        <span class="badge-soft" id="histCount">0</span>
+      </div>
+      <div class="hist-list" id="histList"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="btnClearHist">清空本文件历史</button>
+      <button class="btn btn-primary" id="btnCloseHistory2">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
