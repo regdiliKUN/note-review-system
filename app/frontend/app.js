@@ -580,6 +580,22 @@ function wire() {
     toast('已切换模型：' + e.target.value, 'ok');
   };
 
+  // ── 批量审查 ──
+  $('#btnBatch').onclick = () => {
+    $('#batchProg').textContent = '选择文件后开始。单个文件出错不会影响其他文件。';
+    $('#batchList').innerHTML = '';
+    $('#batchMask').classList.add('on');
+  };
+  $('#btnCloseBatch').onclick = () => $('#batchMask').classList.remove('on');
+  $('#batchMask').onclick = e => {
+    if (e.target.id === 'batchMask' && !S.batchRunning) e.currentTarget.classList.remove('on');
+  };
+  $('#btnBatchStop').onclick = async () => {
+    const r = await window.pywebview.api.cancel_review();
+    if (r && r.ok) toast('已请求停止，当前这篇跑完就停', '');
+  };
+  $('#btnBatchPick').onclick = runBatch;
+
   // ── 审查历史 ──
   $('#btnHistory').onclick = openHistory;
   $('#btnCloseHistory').onclick = () => $('#historyMask').classList.remove('on');
@@ -1936,6 +1952,69 @@ async function doReview() {
   }
 }
 
+/* 批量审查：选多个文件，排队跑完，结果进历史并按需导出 */
+async function runBatch() {
+  if (S.batchRunning) return;
+  const pick = await window.pywebview.api.batch_choose();
+  if (!pick || pick.ok === false) {
+    if (pick && !pick.canceled) toast(pick.error || '选择文件失败', 'err');
+    return;
+  }
+  const paths = pick.paths || [];
+  if (!paths.length) return toast('没有选中文件', 'err');
+
+  const doSum = !!$('#batchSummary').checked;
+  const fmt = $('#batchFmt').value;
+  const list = $('#batchList');
+  list.innerHTML = paths.map((p, i) => {
+    const name = p.split(/[\\/]/).pop();
+    return `<div class="batch-row" data-i="${i + 1}" title="${esc(p)}">
+      <span class="bi">${i + 1}</span>
+      <span class="bn">${esc(name)}</span>
+      <span class="bs">等待中</span>
+    </div>`;
+  }).join('');
+
+  S.batchRunning = true;
+  $('#btnBatchPick').disabled = true;
+  $('#btnBatchStop').style.display = '';
+  $('#batchProg').textContent = `共 ${paths.length} 篇，正在开始…`;
+
+  try {
+    const r = await window.pywebview.api.batch_review(paths, doSum, fmt);
+    if (r.ok === false) {
+      toast(r.error || '批量审查失败', 'err');
+      return;
+    }
+    (r.results || []).forEach((res, i) => {
+      const row = list.querySelector(`.batch-row[data-i="${i + 1}"]`);
+      if (!row) return;
+      const s = row.querySelector('.bs');
+      if (res.ok) {
+        s.textContent = `${res.anns} 条批注 · ${res.elapsed}s` + (res.exported ? ' · 已导出' : '');
+        s.className = 'bs ok';
+        row.classList.add('done');
+        if (res.failed) {
+          s.textContent += ` · ${res.failed} 段未审`;
+          s.className = 'bs warn';
+        }
+      } else {
+        s.textContent = res.error || '失败';
+        s.className = 'bs err';
+      }
+    });
+    $('#batchProg').textContent =
+      `完成：成功 ${r.succeeded} 篇 / 共 ${r.total} 篇，总耗时 ${fmtDur(r.elapsed)}`;
+    toast(`批量审查完成：${r.succeeded}/${r.total}`, r.failedCount ? 'err' : 'ok');
+  } catch (e) {
+    toast('批量审查出错：' + e, 'err');
+  } finally {
+    S.batchRunning = false;
+    $('#btnBatchPick').disabled = false;
+    $('#btnBatchStop').style.display = 'none';
+  }
+}
+
 /* 只补审上次失败的段落：不重跑全文，已处理好的判断全部保留 */
 async function doRetryFailed() {
   if (!S.p || !S.p.doc) return toast('请先导入文档', 'err');
@@ -1971,6 +2050,21 @@ async function doRetryFailed() {
 }
 
 window.__evt = function (evt, data) {
+  if (evt === 'batch') {
+    const row = $(`.batch-row[data-i="${data.index}"]`);
+    if (row) {
+      const s = row.querySelector('.bs');
+      if (data.stage === 'start') {
+        s.textContent = '审查中…';
+        s.className = 'bs run';
+        row.classList.add('run');
+      } else {
+        row.classList.remove('run');
+      }
+    }
+    $('#batchProg').textContent = `正在处理第 ${data.index}/${data.total} 篇：${data.name}`;
+    return;
+  }
   if (evt === 'progress') {
     const pct = Math.max(0, Math.min(1, data.pct || 0));
     $('#progressFill').style.width = Math.round(pct * 100) + '%';

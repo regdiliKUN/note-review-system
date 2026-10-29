@@ -327,6 +327,17 @@ t('健康度卡片样式已定义', () => {
   }
 });
 
+t('批量审查弹层元素齐备', () => {
+  for (const id of ['btnBatch', 'batchMask', 'batchFmt', 'batchList', 'btnBatchPick']) {
+    assert.ok(html.includes(`id="${id}"`), `缺少 #${id}`);
+  }
+  assert.ok(/batch_review/.test(appJs), 'app.js 应调用 batch_review');
+});
+
+t('批量审查有进度事件分支', () => {
+  assert.ok(/evt === 'batch'/.test(appJs), '需要处理 batch 进度事件');
+});
+
 /* ── 汇总 ── */
 console.log('='.repeat(62));
 console.log(`前端用例 ${pass + fail}　通过 ${pass}　失败 ${fail}`);

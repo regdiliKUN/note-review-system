@@ -718,29 +718,40 @@ class Api:
     def _save_history(self, elapsed: float):
         if not self.doc:
             return None
+        entry = self._save_snapshot(
+            self.doc, self.anns, self.summary, self.image_report, elapsed,
+            self._last_failed_blocks)
+        if entry:
+            self.history_current = {"id": entry["id"], "ts": entry.get("ts") or "",
+                                    "stale": False, "auto": False}
+        return entry
+
+    def _save_snapshot(self, doc: dict, anns: list, summary: dict,
+                       image_report: dict, elapsed: float,
+                       failed_blocks=None):
+        """把一次审查结果写进历史（单篇审查与批量审查共用）。"""
         try:
-            size, mtime = self._fingerprint(self.doc["path"])
+            path = doc["path"]
+            size, mtime = self._fingerprint(path)
             snap = {
-                "anns": self.anns,
-                "summary": self.summary,
-                "image_report": self.image_report,
+                "anns": anns,
+                "summary": summary,
+                "image_report": image_report,
                 "model": self.cfg.get("model", ""),
                 "vision": self.cfg.get("vision_model", ""),
                 "elapsed": elapsed,
                 "file_size": size,
                 "file_mtime": mtime,
-                "blocks": len(self.doc["blocks"]),
-                "images": docmodel.count_images(self.doc["blocks"]),
-                "title": self.doc.get("title", ""),
+                "blocks": len(doc["blocks"]),
+                "images": docmodel.count_images(doc["blocks"]),
+                "title": doc.get("title", ""),
                 # 段落文本指纹：下次增量审查据此判断「哪些段落没变、批注可以复用」
-                "block_hashes": {b["id"]: _text_hash(b) for b in self.doc["blocks"]},
+                "block_hashes": {b["id"]: _text_hash(b) for b in doc["blocks"]},
                 # 本次没能审到的段落：增量审查会强制重审，绝不当作「已审过」
-                "failed_blocks": list(self._last_failed_blocks),
+                "failed_blocks": list(failed_blocks or []),
             }
-            entry = self.history.save(self.doc["path"], snap)
-            self.history_current = {"id": entry["id"], "ts": entry.get("ts") or "",
-                                    "stale": False, "auto": False}
-            self._log(f"已保存审查历史 {entry['id']}（{self.doc['path']}）")
+            entry = self.history.save(path, snap)
+            self._log(f"已保存审查历史 {entry['id']}（{path}）")
             return entry
         except Exception as e:
             self._log(f"历史保存失败：{e}")
@@ -1298,6 +1309,156 @@ class Api:
         finally:
             self.busy = False
 
+    # ------------------------------------------------------------ 批量审查
+    def _parse_to_doc(self, path: str) -> dict:
+        """把文件解析成文档字典，但**不改变当前会话状态**（批量审查用）。"""
+        ext = os.path.splitext(path)[1].lower()
+        doc_id = _sha(path + str(os.path.getmtime(path)))
+        store = docmodel.ImageStore(self.asset_root, doc_id)
+        if ext == ".docx":
+            parsed = docmodel.parse_docx(path, store)
+        elif ext == ".doc":
+            parsed = docmodel.parse_doc(path, store)
+        elif ext.lstrip(".") in media.MEDIA_EXT:
+            parsed = media.parse_media(path, store, self._llm(), self.cfg)
+        else:
+            parsed = docmodel.parse_text(path, store)
+        return {
+            "title": parsed["title"],
+            "blocks": parsed["blocks"],
+            "path": path,
+            "doc_id": doc_id,
+            "asset_dir": store.dir,
+            "source_type": parsed.get("source_type") or "doc",
+            "media": parsed.get("media") or {},
+        }
+
+    def batch_choose(self) -> dict:
+        """一次选多个文件，交给批量审查排队。"""
+        win = self.get_window()
+        if not win:
+            return {"ok": False}
+        try:
+            import webview
+            res = win.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=True, file_types=FILE_TYPES)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not res:
+            return {"ok": False, "canceled": True}
+        paths = [p for p in (res if isinstance(res, (list, tuple)) else [res])
+                 if os.path.isfile(p)]
+        return {"ok": True, "paths": paths, "count": len(paths)}
+
+    def batch_review(self, paths, do_summary: bool = False,
+                     export_fmt: str = "docx") -> dict:
+        """逐个审查多个文件：不切换当前文档，结果直接落历史并按需导出。
+
+        单个文件失败只影响它自己 —— 批量任务最怕「第 7 个文件报错，
+        前 6 个白跑」，所以这里逐个 try 包住，最后统一汇总。
+        """
+        if self.busy:
+            return {"ok": False, "error": "正在处理中，请稍候"}
+        paths = [os.path.abspath(p) for p in (paths or []) if os.path.isfile(p)]
+        if not paths:
+            return {"ok": False, "error": "没有可审查的文件"}
+        llm = self._llm()
+        if not self.cfg.get("model"):
+            h = llm.health()
+            if h.get("models"):
+                self.cfg["model"] = h["models"][0]
+                llm.model = self.cfg["model"]
+            else:
+                return {"ok": False, "error": "未检测到可用模型，请先启动 Ollama"}
+
+        export_fmt = (export_fmt or "").lower().lstrip(".")
+        if export_fmt not in ("docx", "html", "md", "txt", ""):
+            export_fmt = "docx"
+        out_dir = os.path.join(self.app_root, "导出结果")
+
+        self.busy = True
+        self._cancel.clear()
+        total = len(paths)
+        results = []
+        t_all = time.time()
+        try:
+            for i, path in enumerate(paths):
+                name = os.path.basename(path)
+                if self._cancel.is_set():
+                    results.append({"path": path, "name": name, "ok": False,
+                                    "error": "已取消"})
+                    continue
+                self._push("batch", {"index": i + 1, "total": total, "name": name,
+                                     "stage": "start"})
+                t0 = time.time()
+                try:
+                    doc = self._parse_to_doc(path)
+                    rep: dict = {}
+                    anns = review_document(
+                        doc, llm, report=rep,
+                        level=str(self.cfg.get("review_level") or "normal"),
+                        glossary=self.cfg.get("glossary") or [],
+                        should_stop=self._cancel.is_set,
+                        scenario=str(self.cfg.get("review_scenario") or "general"),
+                        concurrency=int(self.cfg.get("review_concurrency", 1) or 1),
+                        max_per_block=int(self.cfg.get("review_max_per_block", 0) or 0))
+                    summary = summarize(doc, llm) if (do_summary and not rep.get("canceled")) else {}
+                    failed = sorted({bid for f in (rep.get("failed") or [])
+                                     for bid in (f.get("blocks") or [])})
+                    elapsed = round(time.time() - t0, 1)
+                    self._save_snapshot(doc, anns, summary, {}, elapsed, failed)
+                    exported = ""
+                    if export_fmt and anns and not rep.get("canceled"):
+                        exported = self._batch_export(doc, anns, out_dir, export_fmt)
+                    results.append({
+                        "path": path, "name": name, "ok": True,
+                        "anns": len(anns), "failed": len(failed),
+                        "elapsed": elapsed, "exported": exported,
+                        "canceled": bool(rep.get("canceled")),
+                    })
+                except Exception as e:
+                    self._err(f"批量审查失败：{path}")
+                    results.append({"path": path, "name": name, "ok": False,
+                                    "error": f"{type(e).__name__}: {e}"})
+                self._push("batch", {"index": i + 1, "total": total, "name": name,
+                                     "stage": "done",
+                                     "ok": results[-1]["ok"]})
+        finally:
+            self.busy = False
+
+        okn = sum(1 for r in results if r["ok"])
+        self._log(f"批量审查完成：{okn}/{total}，耗时 {round(time.time() - t_all, 1)}s")
+        return {"ok": True, "results": results, "total": total,
+                "succeeded": okn, "failedCount": total - okn,
+                "elapsed": round(time.time() - t_all, 1)}
+
+    def _batch_export(self, doc: dict, anns: list, out_dir: str, fmt: str) -> str:
+        """把批量审查的修正版导出到「导出结果」目录，返回路径（失败返回空串）。
+
+        批量流程里没人逐条取舍，所以导出时**应用全部建议** —— 否则导出的
+        「修正版」和原文一模一样，等于没导。历史快照里保存的仍是「待处理」
+        状态，之后单独打开这个文件依然可以逐条保留/丢弃。
+        """
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            stem = os.path.splitext(os.path.basename(doc["path"]))[0]
+            out = os.path.join(out_dir, f"{stem}_修正版.{fmt}")
+            accepted = [dict(a, status="accepted") for a in anns
+                        if a.get("op") != "comment"]
+            blocks = review.apply_accepted(doc["blocks"], accepted)
+            if fmt == "docx":
+                docmodel.export_docx(blocks, doc["asset_dir"], out, doc.get("title", ""))
+            elif fmt == "html":
+                docmodel.export_html(blocks, doc["asset_dir"], out, doc.get("title", ""))
+            elif fmt == "md":
+                self._export_md(blocks, out, doc)
+            else:
+                self._export_txt(blocks, out, doc)
+            return out
+        except Exception as e:
+            self._log(f"批量导出失败（{doc.get('path')}）：{e}")
+            return ""
+
     def add_manual_note(self, block_id: str, text: str, typ: str = "存疑待核") -> dict:
         """用户自己加一条批注。
 
@@ -1742,7 +1903,8 @@ class Api:
             return blocks
         return self.blocks_current or self.doc["blocks"]
 
-    def _export_md(self, blocks, out_path):
+    def _export_md(self, blocks, out_path, doc=None):
+        doc = doc or self.doc
         d = os.path.dirname(out_path)
         stem = os.path.splitext(os.path.basename(out_path))[0]
         imdir = os.path.join(d, stem + "_图片")
@@ -1755,7 +1917,7 @@ class Api:
                         os.remove(os.path.join(imdir, fn))
                     except Exception:
                         pass
-        lines = [f"# {self.doc['title']}", ""]
+        lines = [f"# {doc['title']}", ""]
         n = 0
         for b in blocks:
             if b["kind"] == "table":
@@ -1786,7 +1948,7 @@ class Api:
                 else:
                     os.makedirs(imdir, exist_ok=True)
                     n += 1
-                    src = os.path.join(self.doc["asset_dir"], s["file"])
+                    src = os.path.join(doc["asset_dir"], s["file"])
                     dst = os.path.join(imdir, f"{n:03d}_{s['file']}")
                     try:
                         shutil.copy2(src, dst)
@@ -1803,8 +1965,9 @@ class Api:
             lines.append("")
         open(out_path, "w", encoding="utf-8").write("\n".join(lines))
 
-    def _export_txt(self, blocks, out_path):
-        out = [self.doc["title"], "=" * 40, ""]
+    def _export_txt(self, blocks, out_path, doc=None):
+        doc = doc or self.doc
+        out = [doc["title"], "=" * 40, ""]
         n = 0
         for b in blocks:
             if b["kind"] == "table":

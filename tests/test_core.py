@@ -2747,5 +2747,85 @@ class TestConfigBackup(unittest.TestCase):
         self.assertEqual(merge_imported_config({}, [], set()), ({}, []))
 
 
+class TestBatchReview(unittest.TestCase):
+    """批量审查：逐个跑、失败隔离、结果落历史并按需导出。"""
+
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_batch_")
+        os.makedirs(os.path.join(self.tmp, "assets"), exist_ok=True)
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.files = []
+        for i in range(3):
+            p = os.path.join(self.tmp, f"n{i}.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(f"第{i}篇标题\n\n这是第{i}篇的正文内容，足够长可以审查。\n")
+            self.files.append(p)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _mock(self, reply_for=None):
+        def fn(system, user):
+            bid = "b1"
+            for tok in user.split():
+                if tok.startswith("[b") and "｜" in tok:
+                    bid = tok[1:tok.index("｜")]
+                    break
+            return json.dumps({"annotations": [
+                {"block_id": bid, "sid": 0, "op": "replace_sentence",
+                 "type": "表达优化", "replacement": "改写后的正文。", "reason": "r"}]},
+                ensure_ascii=False)
+        return MockLLM(fn=fn)
+
+    def test_batch_success_and_export(self):
+        self.api._llm = lambda: self._mock()
+        r = self.api.batch_review(self.files, export_fmt="md")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["succeeded"], 3)
+        for res in r["results"]:
+            self.assertTrue(res["ok"], res)
+            self.assertTrue(os.path.isfile(res["exported"]), "应导出修正版")
+            self.assertGreater(res["anns"], 0)
+        # 历史里应有 3 个文件各一条记录
+        total = sum(len(self.api.history.entries(p)) for p in self.files)
+        self.assertEqual(total, 3)
+
+    def test_batch_failure_isolated(self):
+        bad = os.path.join(self.tmp, "bad.txt")
+        with open(bad, "wb") as f:
+            f.write(b"\x00\x01\x02" * 400)      # 二进制冒充 txt → 解析失败
+        self.api._llm = lambda: self._mock()
+        r = self.api.batch_review([self.files[0], bad, self.files[1]], export_fmt="")
+        self.assertEqual(r["total"], 3)
+        self.assertEqual(r["succeeded"], 2, "坏文件不能影响其他文件")
+        self.assertFalse(r["results"][1]["ok"])
+        self.assertTrue(r["results"][0]["ok"] and r["results"][2]["ok"])
+
+    def test_batch_empty_input(self):
+        r = self.api.batch_review([], export_fmt="md")
+        self.assertFalse(r["ok"])
+
+    def test_batch_missing_files_filtered(self):
+        r = self.api.batch_review([os.path.join(self.tmp, "nope.txt")], export_fmt="")
+        self.assertFalse(r["ok"])
+
+    def test_batch_busy_guard(self):
+        self.api.busy = True
+        r = self.api.batch_review(self.files)
+        self.assertFalse(r["ok"])
+        self.assertIn("处理中", r["error"])
+
+    def test_batch_export_txt(self):
+        self.api._llm = lambda: self._mock()
+        r = self.api.batch_review([self.files[0]], export_fmt="txt")
+        self.assertTrue(r["ok"])
+        path = r["results"][0]["exported"]
+        self.assertTrue(path.endswith(".txt"))
+        self.assertIn("改写后的正文", open(path, encoding="utf-8").read())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

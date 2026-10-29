@@ -45,6 +45,13 @@
         </svg>
         批量图片
       </button>
+      <button class="btn btn-ghost" id="btnBatch" title="一次选多个文件排队审查">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px">
+          <path d="M4 7h16M4 12h16M4 17h10"/>
+        </svg>
+        批量审查
+      </button>
       <button class="btn btn-accent" id="btnReview" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l2.1 4.6 5 .6-3.7 3.4 1 4.9L12 14.9 7.6 16.5l1-4.9L4.9 8.2l5-.6z"/></svg>
         <span id="btnReviewTxt">开始 AI 审查</span>
@@ -523,6 +530,45 @@
     <div class="modal-foot">
       <button class="btn btn-ghost" id="btnCancelNote">取消</button>
       <button class="btn btn-primary" id="btnSaveNote">保存批注</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量审查弹层 -->
+<div class="modal-mask" id="batchMask">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>批量审查</h3>
+      <button class="icon-btn" id="btnCloseBatch" aria-label="关闭批量审查">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>审查完成后</label>
+        <div class="checks">
+          <label class="ck"><input type="checkbox" id="batchSummary"> 同时生成内容归纳（每篇多一次模型调用）</label>
+        </div>
+      </div>
+      <div class="field">
+        <label>导出格式</label>
+        <select id="batchFmt">
+          <option value="docx">Word · 修正后版本</option>
+          <option value="html">网页 · 修正后版本</option>
+          <option value="md">Markdown · 修正后版本</option>
+          <option value="txt">纯文本 · 修正后版本</option>
+          <option value="">不导出，只存历史</option>
+        </select>
+        <div class="hint">
+          每篇的结果都会写入审查历史，之后单独打开该文件会直接载入，不必重跑。
+          导出文件统一放在程序目录的「导出结果」文件夹里。<b>批量导出会应用全部建议</b>；
+          想逐条取舍，单独打开该文件即可。
+        </div>
+      </div>
+      <div class="hint" id="batchProg">选择文件后开始。单个文件出错不会影响其他文件。</div>
+      <div class="batch-list" id="batchList"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="btnBatchStop" style="display:none">停止</button>
+      <button class="btn btn-primary" id="btnBatchPick">选择文件并开始</button>
     </div>
   </div>
 </div>
