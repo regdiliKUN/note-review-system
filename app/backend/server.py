@@ -27,6 +27,9 @@ class Handler(BaseHTTPRequestHandler):
     asset_root = ""
     protocol_version = "HTTP/1.1"
     log_path = ""
+    # 大图不再一次性读进内存：超过这个尺寸就分块流式写出去
+    STREAM_THRESHOLD = 1 * 1024 * 1024
+    CHUNK = 64 * 1024
 
     def log_message(self, fmt, *args):
         if not self.log_path:
@@ -36,6 +39,15 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else ''}\n")
         except Exception:
             pass
+
+    def _common_headers(self):
+        # 本地服务也要给基础安全头：万一哪天页面里混进了外部脚本，
+        # 这些头能挡住内容嗅探与跨窗口引用。
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
+    def _etag(self, st) -> str:
+        return f'"{int(st.st_mtime_ns):x}-{st.st_size:x}"'
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
@@ -60,13 +72,68 @@ class Handler(BaseHTTPRequestHandler):
             return
         ext = os.path.splitext(full)[1].lower()
         try:
+            st = os.stat(full)
+        except Exception:
+            self.send_error(500)
+            return
+        etag = self._etag(st)
+
+        # 条件请求：内容没变就回 304，省掉重复传输（大图尤其明显）
+        inm = (self.headers.get("If-None-Match") or "").strip()
+        if inm and inm == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            if cacheable:
+                self.send_header("Cache-Control", "public, max-age=86400")
+            else:
+                self.send_header("Cache-Control", "no-cache, must-revalidate")
+            self._common_headers()
+            self.end_headers()
+            return
+
+        ctype = MIME.get(ext) or mimetypes.guess_type(full)[0] or "application/octet-stream"
+        size = st.st_size
+
+        # 大文件分块流式输出，避免一次性把几十 MB 读进内存
+        if size > self.STREAM_THRESHOLD:
+            try:
+                f = open(full, "rb")
+            except Exception:
+                self.send_error(500)
+                return
+            with f:
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(size))
+                self.send_header("ETag", etag)
+                self.send_header("Accept-Ranges", "bytes")
+                self._common_headers()
+                if cacheable:
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                else:
+                    self.send_header("Cache-Control", "no-cache, must-revalidate")
+                    self.send_header("Pragma", "no-cache")
+                self.end_headers()
+                try:
+                    while True:
+                        chunk = f.read(self.CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                except Exception:
+                    pass
+            return
+
+        try:
             data = open(full, "rb").read()
         except Exception:
             self.send_error(500)
             return
         self.send_response(200)
-        self.send_header("Content-Type", MIME.get(ext) or mimetypes.guess_type(full)[0] or "application/octet-stream")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self._common_headers()
         if cacheable:
             # 图片内容由内容哈希命名，永不变化 → 可以长缓存
             self.send_header("Cache-Control", "public, max-age=86400")

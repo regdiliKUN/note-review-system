@@ -966,3 +966,10 @@ textarea:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140
 .batch-row .bs.err{color:var(--no)}
 .batch-row.run{border-color:var(--accent)}
 .batch-row.done{opacity:.92}
+
+/* 图片加载失败时的占位（不显示裂图图标） */
+img.img-broken{
+  min-width:120px;min-height:64px;background:
+    repeating-linear-gradient(45deg,#f1f3f7,#f1f3f7 6px,#e7ebf2 6px,#e7ebf2 12px);
+  border:1px dashed #c8d0dd;border-radius:6px;
+}

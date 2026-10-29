@@ -1870,7 +1870,10 @@ class Api:
                 return {"ok": False, "error": f"不支持的格式 {fmt}"}
         except Exception as e:
             self._err(f"导出失败：{out_path}")
-            return {"ok": False, "error": f"导出失败：{e}"}
+            hint = ""
+            if os.path.exists(out_path):
+                hint = f"。可能留下不完整的文件：{out_path}"
+            return {"ok": False, "error": f"导出失败：{e}{hint}"}
         return {"ok": True, "path": out_path, "format": fmt}
 
     def _export_report(self, kind: str, fmt: str, out_path: str) -> dict:
@@ -2027,6 +2030,18 @@ class Api:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def log_client_error(self, message: str, source: str = "", line: int = 0) -> dict:
+        """前端脚本错误落盘。
+
+        打包成 exe 之后没有控制台，前端一旦抛异常用户只看到「点了没反应」。
+        把错误写进日志，出问题时至少能查到是哪一行。
+        """
+        try:
+            self._log(f"[前端错误] {message} @ {source}:{line}")
+        except Exception:
+            pass
+        return {"ok": True}
 
     def quit(self) -> dict:
         """退出。审查进行中先问一句 —— 点叉直接丢掉半小时的审查结果太伤。"""

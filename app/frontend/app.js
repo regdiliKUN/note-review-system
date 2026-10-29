@@ -1232,7 +1232,9 @@ function tokHtml(tokens, docId, am) {
     if (t.k === 't') return hi(t.v, q).replace(/\n/g, '<br>');
     if (t.k === 'i') {
       const w = t.img.w ? ` width="${t.img.w}"` : '';
-      return `<img src="/assets/${docId}/${encodeURIComponent(t.img.file)}"${w} loading="lazy" alt="">`;
+      const alt = t.img.alt ? ` alt="${esc(t.img.alt)}"` : ' alt=""';
+      return `<img src="/assets/${docId}/${encodeURIComponent(t.img.file)}"${w}${alt}`
+        + ` loading="lazy" onerror="this.classList.add('img-broken')">`;
     }
     if (t.k === 'mark') {
       const a = am[t.op] || {};
@@ -2091,3 +2093,19 @@ function toast(msg, kind) {
 
 window.addEventListener('pywebviewready', init);
 if (window.pywebview && window.pywebview.api) init();
+
+/* ── 全局兜底：界面出错也要让用户看见、让日志留下痕迹 ── */
+window.addEventListener('error', e => {
+  const msg = (e && e.message) || '未知脚本错误';
+  if (/ResizeObserver|Script error/i.test(msg)) return;   // 浏览器自身的噪声
+  toast('界面出错：' + msg, 'err');
+  try {
+    window.pywebview.api.log_client_error(String(msg), e.filename || '', e.lineno || 0);
+  } catch (_) { /* 桥还没就绪就忽略 */ }
+});
+window.addEventListener('unhandledrejection', e => {
+  const r = e && e.reason;
+  const msg = (r && r.message) || String(r || '未知错误');
+  if (/canceled|abort/i.test(msg)) return;
+  toast('操作失败：' + msg, 'err');
+});

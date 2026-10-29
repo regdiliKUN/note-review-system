@@ -338,6 +338,19 @@ t('批量审查有进度事件分支', () => {
   assert.ok(/evt === 'batch'/.test(appJs), '需要处理 batch 进度事件');
 });
 
+t('前端有全局错误兜底', () => {
+  assert.ok(/addEventListener\('error'/.test(appJs), '缺少 window error 兜底');
+  assert.ok(/unhandledrejection/.test(appJs), '缺少 Promise 拒绝兜底');
+  assert.ok(/log_client_error/.test(appJs), '前端错误应落盘到日志');
+});
+
+t('图片加载失败有占位样式', () => {
+  const css = require('node:fs').readFileSync(
+    path.join(ROOT, 'app', 'frontend', 'styles.css'), 'utf8');
+  assert.ok(/img-broken/.test(appJs), '渲染图片时应挂 onerror 标记');
+  assert.ok(/img\.img-broken/.test(css), '缺少裂图占位样式');
+});
+
 /* ── 汇总 ── */
 console.log('='.repeat(62));
 console.log(`前端用例 ${pass + fail}　通过 ${pass}　失败 ${fail}`);

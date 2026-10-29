@@ -151,6 +151,23 @@ def main():
     win.events.shown += lambda *a: (api._log("event: shown"), apply_window_icon(title, icon))
     win.events.loaded += lambda *a: api._log("event: loaded")
 
+    def _on_closing(*_a):
+        """关窗前把当前的取舍进度写回历史。
+
+        用户常常是在「挑到一半」的时候顺手关掉窗口，不落盘的话
+        这一轮几十条判断就白做了。
+        """
+        try:
+            api.save_progress()
+            api._log("event: closing（已保存取舍进度）")
+        except Exception:
+            pass
+
+    try:
+        win.events.closing += _on_closing
+    except Exception:
+        pass
+
     try:
         webview.start(gui="edgechromium", debug=bool(os.environ.get("NR_DEBUG")),
                       private_mode=False,

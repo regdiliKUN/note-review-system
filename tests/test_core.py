@@ -2937,5 +2937,78 @@ class TestReviewQuality(unittest.TestCase):
         self.assertEqual(Api._quality_note({}), "")
 
 
+class TestStaticServer(unittest.TestCase):
+    """本地静态服务：缓存、条件请求、目录穿越防护。"""
+
+    def setUp(self):
+        import urllib.request
+        from backend import server
+        self.tmp = tempfile.mkdtemp(prefix="nr_srv_")
+        self.assets = os.path.join(self.tmp, "assets", "d1")
+        os.makedirs(self.assets, exist_ok=True)
+        with open(os.path.join(self.tmp, "index.html"), "w", encoding="utf-8") as f:
+            f.write("<h1>hi</h1>")
+        with open(os.path.join(self.assets, "a.png"), "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"0" * 100)
+        self.httpd, self.port = server.start(self.tmp, os.path.join(self.tmp, "assets"))
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.urllib = urllib.request
+
+    def tearDown(self):
+        try:
+            self.httpd.shutdown()
+        except Exception:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _get(self, path, headers=None):
+        req = self.urllib.Request(self.base + path, headers=headers or {})
+        try:
+            with self.urllib.urlopen(req, timeout=5) as r:
+                return r.status, dict(r.headers), r.read()
+        except self.urllib.HTTPError as e:
+            return e.code, dict(e.headers), b""
+
+    def test_index_served(self):
+        st, h, body = self._get("/index.html")
+        self.assertEqual(st, 200)
+        self.assertIn(b"hi", body)
+        self.assertIn("text/html", h.get("Content-Type", ""))
+
+    def test_root_maps_to_index(self):
+        st, _, body = self._get("/")
+        self.assertEqual(st, 200)
+        self.assertIn(b"hi", body)
+
+    def test_asset_served_with_long_cache(self):
+        st, h, _ = self._get("/assets/d1/a.png")
+        self.assertEqual(st, 200)
+        self.assertIn("max-age", h.get("Cache-Control", ""))
+
+    def test_etag_304(self):
+        st, h, _ = self._get("/assets/d1/a.png")
+        etag = h.get("ETag")
+        self.assertTrue(etag)
+        st2, h2, body2 = self._get("/assets/d1/a.png", {"If-None-Match": etag})
+        self.assertEqual(st2, 304)
+        self.assertEqual(body2, b"")
+
+    def test_no_cache_on_html(self):
+        st, h, _ = self._get("/index.html")
+        self.assertIn("no-cache", h.get("Cache-Control", ""))
+
+    def test_missing_returns_404(self):
+        st, _, _ = self._get("/nope.png")
+        self.assertEqual(st, 404)
+
+    def test_traversal_blocked(self):
+        st, _, _ = self._get("/../secret.txt")
+        self.assertIn(st, (400, 403, 404))
+
+    def test_security_headers(self):
+        st, h, _ = self._get("/index.html")
+        self.assertEqual(h.get("X-Content-Type-Options"), "nosniff")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
