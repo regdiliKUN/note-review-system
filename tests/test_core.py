@@ -1633,12 +1633,31 @@ class TestRobustness(unittest.TestCase):
         self.assertTrue(os.path.isdir(mine), "非程序生成的目录一律不能动")
 
     def test_oversized_file_rejected(self):
-        p = os.path.join(self.tmp, "big.txt")
-        with open(p, "wb") as f:
-            f.truncate(201 * 1024 * 1024)
-        r = self.api.load(p)
-        self.assertFalse(r["ok"])
-        self.assertIn("过大", r["error"])
+        """阈值是模块常量，用小文件验证同一段逻辑，不必真写 200MB。"""
+        from backend import api as api_mod
+        old = api_mod.MAX_IMPORT_BYTES
+        api_mod.MAX_IMPORT_BYTES = 1024
+        try:
+            p = os.path.join(self.tmp, "big.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("x" * 2048)
+            r = self.api.load(p)
+            self.assertFalse(r["ok"])
+            self.assertIn("过大", r["error"])
+        finally:
+            api_mod.MAX_IMPORT_BYTES = old
+
+    def test_file_under_limit_loads(self):
+        from backend import api as api_mod
+        old = api_mod.MAX_IMPORT_BYTES
+        api_mod.MAX_IMPORT_BYTES = 1024 * 1024
+        try:
+            p = os.path.join(self.tmp, "ok.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("正常内容。")
+            self.assertTrue(self.api.load(p)["ok"])
+        finally:
+            api_mod.MAX_IMPORT_BYTES = old
 
     def test_diagnose_shape(self):
         r = self.api.diagnose()

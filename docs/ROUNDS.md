@@ -125,3 +125,7 @@
 | 118 | app.undoLast | Ctrl+Z 撤销上一步批注状态（最多 60 步） | 误点「全部保留」还能救回来 |
 | 119 | api.estimate_review | 审查前预估段数/字数/时长，直接显示在进度条上 | 十几分钟的长任务开始前就知道要等多久 |
 | 120 | 快捷键面板 | 补充 Ctrl+Z、右键菜单等新操作说明 | 新能力可被发现，而不是藏着 |
+| 121 | tests/run_tests.py | 强制 stdout/stderr 为 UTF-8 | 修掉「测试全过但进程退出码 1、日志一片空白」的 CI 悬案（Windows 代码页编不出中文） |
+| 122 | tests/run_tests.py | 前端检查全程 try/except，异常退出时明确报出 | 以前 node 调用失败会被当成「有失败但不知为何」 |
+| 123 | api.MAX_IMPORT_BYTES | 体积阈值提为模块常量，测试用小文件验证同一段逻辑 | 每次跑测试不再真写 200MB 稀疏文件，本地耗时 10.5s → 8.1s |
+| 124 | CI workflow | 显式设置 `PYTHONUTF8` / `PYTHONIOENCODING` | 与 121 双保险，不依赖脚本自身的 reconfigure |

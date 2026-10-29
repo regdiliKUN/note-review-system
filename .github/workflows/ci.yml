@@ -33,7 +33,13 @@ jobs:
           pip install python-docx lxml Pillow
 
       - name: 运行全部测试（离线，无需模型服务）
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: python tests/run_tests.py -q
 
       - name: 性能回归门禁
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: python tests/bench.py

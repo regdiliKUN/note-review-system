@@ -25,6 +25,11 @@ RELAYOUT_DEFAULTS = {
     "split_long_paras": True, "number_style": "cn",
 }
 
+# 导入体积上限：python-docx 会把整份 XML 读进内存，
+# 几百 MB 的 docx 在 8G 内存的机器上会直接把进程拖死。
+MAX_IMPORT_BYTES = 200 * 1024 * 1024
+WARN_IMPORT_BYTES = 60 * 1024 * 1024
+
 FILE_TYPES = (
     "笔记与多媒体 (*.docx;*.doc;*.txt;*.md;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;"
     "*.mp4;*.mov;*.mkv;*.avi;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp)",
@@ -417,16 +422,15 @@ class Api:
             return {"ok": False,
                     "error": f"暂不支持 {ext} 格式；可导入 docx/doc/txt/md，"
                              f"以及 mp3/wav/m4a 等语音、mp4/mov 等视频、png/jpg 等图片"}
-        # 超大文件保护：python-docx 会把整份 XML 读进内存，
-        # 几百 MB 的 docx 在 8G 内存的机器上会直接把进程拖死。
+        # 超大文件保护（阈值是模块常量，便于测试用小文件验证同一段逻辑）
         try:
             size = os.path.getsize(path)
-            if size > 200 * 1024 * 1024:
+            if size > MAX_IMPORT_BYTES:
                 return {"ok": False,
                         "error": f"文件过大（{size / 1024 / 1024:.0f} MB）。"
                                  "本程序面向个人笔记，建议拆分后再导入，"
                                  "或先用 Word 另存为 .docx（去掉历史版本与批注）压缩体积。"}
-            if size > 60 * 1024 * 1024:
+            if size > WARN_IMPORT_BYTES:
                 self._warn(f"导入较大文件 {size / 1024 / 1024:.0f} MB：{path}")
         except Exception:
             pass

@@ -23,6 +23,23 @@ sys.path.insert(0, os.path.join(ROOT, "app"))
 FRONTEND = os.path.join(ROOT, "app", "frontend")
 
 
+def _force_utf8():
+    """把标准输出切到 UTF-8。
+
+    Windows 的 CI runner 默认 stdout 编码是本地代码页（cp1252 之类），
+    打印中文会直接抛 UnicodeEncodeError —— 表现就是「测试全过，进程退出码 1」，
+    而且日志里一行输出都没有，极难排查。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_force_utf8()
+
+
 def run_frontend() -> int:
     """node 可用时跑前端用例与语法检查；不可用则跳过（不算失败）。"""
     node = shutil.which("node")
@@ -34,19 +51,31 @@ def run_frontend() -> int:
         p = os.path.join(FRONTEND, f)
         if not os.path.isfile(p):
             continue
-        r = subprocess.run([node, "--check", p], capture_output=True, text=True)
+        try:
+            r = subprocess.run([node, "--check", p], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        except Exception as e:
+            print(f"✗ 无法执行 node：{e}")
+            return 1
         if r.returncode != 0:
             print(f"✗ 语法错误 {f}\n{r.stderr}")
             bad += 1
     script = os.path.join(HERE, "test_frontend.mjs")
     if os.path.isfile(script):
-        r = subprocess.run([node, script], capture_output=True, text=True)
+        try:
+            r = subprocess.run([node, script], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        except Exception as e:
+            print(f"✗ 无法执行前端用例：{e}")
+            return 1
         out = (r.stdout or "") + (r.stderr or "")
         for line in out.strip().splitlines():
             if "前端用例" in line or line.strip().startswith("✗"):
                 print(line)
         if r.returncode != 0:
             bad += 1
+            if not out.strip():
+                print("✗ 前端用例异常退出且无输出")
     return bad
 
 
