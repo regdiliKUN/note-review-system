@@ -3091,5 +3091,43 @@ class TestEndToEndSmoke(unittest.TestCase):
         self.assertGreater(len(again["anns"]), 0, "再次打开应自动载入上次结果")
 
 
+class TestFriendlyError(unittest.TestCase):
+    """系统异常要翻译成用户能照着做的提示。"""
+
+    def test_permission_denied_mentions_closing_word(self):
+        from backend.api import friendly_error
+        msg = friendly_error(PermissionError(
+            "[WinError 32] 另一个程序正在使用此文件，进程无法访问。"), "导出")
+        self.assertIn("导出失败", msg)
+        self.assertIn("Word", msg)
+        self.assertIn("关闭", msg)
+
+    def test_file_not_found(self):
+        from backend.api import friendly_error
+        msg = friendly_error(FileNotFoundError("no such file"), "解析文档")
+        self.assertIn("找不到文件", msg)
+
+    def test_disk_full(self):
+        from backend.api import friendly_error
+        msg = friendly_error(OSError("[WinError 112] 磁盘空间不足。"), "导出")
+        self.assertIn("磁盘空间不足", msg)
+
+    def test_is_a_directory(self):
+        from backend.api import friendly_error
+        msg = friendly_error(IsADirectoryError(), "导出")
+        self.assertIn("文件夹", msg)
+
+    def test_unknown_falls_back_with_message(self):
+        from backend.api import friendly_error
+        msg = friendly_error(ValueError("模型返回了奇怪的东西"), "审查")
+        self.assertIn("审查失败", msg)
+        self.assertIn("模型返回了奇怪的东西", msg)
+
+    def test_empty_exception_uses_class_name(self):
+        from backend.api import friendly_error
+        msg = friendly_error(RuntimeError(), "操作")
+        self.assertIn("RuntimeError", msg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

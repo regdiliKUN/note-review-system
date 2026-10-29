@@ -973,3 +973,10 @@ img.img-broken{
     repeating-linear-gradient(45deg,#f1f3f7,#f1f3f7 6px,#e7ebf2 6px,#e7ebf2 12px);
   border:1px dashed #c8d0dd;border-radius:6px;
 }
+
+/* 大文档「继续加载」条 */
+.more-bar{
+  display:flex;align-items:center;justify-content:center;gap:12px;
+  padding:18px 0 4px;color:var(--paper-muted);font-size:12.5px;
+}
+.more-txt{color:#8b95a8}

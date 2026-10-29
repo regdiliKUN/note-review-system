@@ -128,6 +128,30 @@ def merge_imported_config(cfg: dict, data, known: set) -> tuple:
     return incoming, sorted(incoming.keys())
 
 
+def friendly_error(e: Exception, action: str = "操作") -> str:
+    """把系统异常翻译成用户能照着做的提示。
+
+    直接把 `[WinError 32] 另一个程序正在使用此文件` 甩给用户，等于没说；
+    告诉他「先关掉 Word 再试」才是有用的。
+    """
+    msg = str(e) or e.__class__.__name__
+    low = msg.lower()
+    if isinstance(e, PermissionError) or "winerror 32" in low or "being used by another" in low:
+        return (f"{action}失败：目标文件正被其他程序占用（通常是 Word/Excel 还开着它）。"
+                "请先关闭那个程序，或换一个文件名再试。")
+    if isinstance(e, FileNotFoundError) or "no such file" in low:
+        return f"{action}失败：找不到文件或目录，可能已被移动或删除。"
+    if "winerror 112" in low or "not enough space" in low or "磁盘空间" in msg:
+        return f"{action}失败：磁盘空间不足，请清理后再试。"
+    if isinstance(e, IsADirectoryError):
+        return f"{action}失败：选中的是一个文件夹，请选择具体文件。"
+    if "read-only" in low or "readonly" in low or "只读" in msg:
+        return f"{action}失败：目标位置是只读的，换一个目录再试。"
+    if "permission denied" in low:
+        return f"{action}失败：没有写入权限，换一个目录（比如桌面）再试。"
+    return f"{action}失败：{msg}"
+
+
 class Api:
     def __init__(self, workdir: str, get_window, asset_root: str):
         self.workdir = workdir
@@ -538,7 +562,7 @@ class Api:
                     parsed = docmodel.parse_text(path, store)
             except Exception as e:
                 self._err(f"解析失败：{path}")
-                return {"ok": False, "error": f"解析失败：{e}"}
+                return {"ok": False, "error": friendly_error(e, "解析文档")}
 
             self._install_doc(parsed, path, doc_id, store)
 
@@ -614,7 +638,7 @@ class Api:
                         "progress", {"msg": m, "pct": round(0.02 + 0.08 * p, 3)}))
             except Exception as e:
                 self._err("多图导入失败")
-                return {"ok": False, "error": f"解析失败：{e}"}
+                return {"ok": False, "error": friendly_error(e, "解析文档")}
             anchor = paths[0]
             self._install_doc(parsed, anchor, doc_id, store)
             recent = [p for p in self.cfg.get("recent", []) if p != anchor]
@@ -1267,7 +1291,7 @@ class Api:
         except Exception as e:
             self._err("审查出错")
             self.busy = False
-            return {"ok": False, "error": f"审查出错：{e}"}
+            return {"ok": False, "error": friendly_error(e, "审查")}
 
     def retry_failed(self) -> dict:
         """只补审上次失败的段落，其余段落已采纳的判断原样保留。
@@ -1335,7 +1359,7 @@ class Api:
             return {"ok": False, "error": str(e)}
         except Exception as e:
             self._err("补审失败")
-            return {"ok": False, "error": f"补审出错：{e}"}
+            return {"ok": False, "error": friendly_error(e, "补审")}
         finally:
             self.busy = False
 
@@ -1849,7 +1873,7 @@ class Api:
         try:
             os.makedirs(parent, exist_ok=True)
         except Exception as e:
-            return {"ok": False, "error": f"无法创建导出目录 {parent}：{e}"}
+            return {"ok": False, "error": friendly_error(e, f"创建导出目录 {parent}")}
         asset_dir = self.doc["asset_dir"]
         try:
             if fmt == "docx":
@@ -1873,7 +1897,7 @@ class Api:
             hint = ""
             if os.path.exists(out_path):
                 hint = f"。可能留下不完整的文件：{out_path}"
-            return {"ok": False, "error": f"导出失败：{e}{hint}"}
+            return {"ok": False, "error": friendly_error(e, "导出") + hint}
         return {"ok": True, "path": out_path, "format": fmt}
 
     def _export_report(self, kind: str, fmt: str, out_path: str) -> dict:
@@ -1893,7 +1917,7 @@ class Api:
         try:
             os.makedirs(parent, exist_ok=True)
         except Exception as e:
-            return {"ok": False, "error": f"无法创建导出目录 {parent}：{e}"}
+            return {"ok": False, "error": friendly_error(e, f"创建导出目录 {parent}")}
         try:
             if fmt == "csv":
                 rpt.write_csv(self.anns, out_path)

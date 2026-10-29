@@ -5,6 +5,7 @@
 'use strict';
 
 const PAGE_SIZE = 60;          // 批注列表首屏条数，几百条时避免一次性渲染
+const RENDER_CHUNK = 300;      // 正文首屏段数，两千段文档一次性渲染会卡住一两秒
 
 const S = {
   p: null,
@@ -1082,6 +1083,7 @@ function handlePayload(r) {
     // 换了一份文档：清掉上一份的筛选与选中，避免「搜到的其实是旧批注」
     S.histKind = null;
     S.page = 1;
+    S.renderLimit = 0;
     S.active = null;
     S.q = '';
     S.filter = 'all';
@@ -1365,7 +1367,25 @@ function renderDoc() {
     paper.innerHTML = html;
   } else {
     const blocks = p.views[S.view] || p.views.annotated;
-    paper.innerHTML = blocks.map(b => blockHtml(b, docId, am)).join('');
+    // 大文档首屏只渲染前 N 段：两千段一次性 innerHTML 会让界面卡住一两秒
+    const limit = S.renderLimit || RENDER_CHUNK;
+    const shown = blocks.length > limit ? blocks.slice(0, limit) : blocks;
+    let html = shown.map(b => blockHtml(b, docId, am)).join('');
+    if (blocks.length > limit) {
+      html += `<div class="more-bar" id="moreBar">
+        <button class="btn btn-ghost btn-sm" id="btnMore">继续加载后 ${Math.min(RENDER_CHUNK, blocks.length - limit)} 段</button>
+        <span class="more-txt">已显示 ${limit} / ${blocks.length} 段</span>
+      </div>`;
+    }
+    paper.innerHTML = html;
+    const more = $('#btnMore');
+    if (more) more.onclick = () => {
+      S.scrollMem[S.view] = wrap.scrollTop;
+      S.renderLimit = limit + RENDER_CHUNK;
+      renderDoc();
+      const bar = $('#moreBar');
+      if (bar) bar.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
   }
   renderToc();
   wrap.scrollTop = S.scrollMem[S.view] || 0;
@@ -1816,6 +1836,7 @@ function switchView(v) {
   }
   if (S.view === v) return;
   S.view = v;
+  S.renderLimit = 0;          // 换视图从第一屏重新开始
   $$('#viewTabs .tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
   renderDoc();
 }
@@ -1937,6 +1958,22 @@ async function doReview() {
     if (est && est.ok) {
       S.lastMsg = `共 ${est.chunks} 段 / ${est.chars} 字，预计约 ${fmtDur(est.eta)}`;
       $('#progressTxt').textContent = S.lastMsg;
+      // 超过 15 分钟的任务先问一句：8B 模型跑长文档是真要等，别让人等到一半才发现选错文件
+      if (est.eta > 900) {
+        const go = confirm(
+          `这份笔记约 ${est.chars} 字、分 ${est.chunks} 段，预计需要 ${fmtDur(est.eta)}。\n\n`
+          + '建议先用「增量审查」（只审改动过的段落），或在设置里调低审校力度。\n'
+          + '确定现在开始完整审查吗？');
+        if (!go) {
+          S.busy = false;
+          stopTicker();
+          btn.disabled = false;
+          btn.classList.remove('running');
+          $('#btnReviewTxt').textContent = '重新审查';
+          $('#progressWrap').classList.remove('on');
+          return;
+        }
+      }
     }
   } catch (e) { /* 估算失败不影响主流程 */ }
   try {
