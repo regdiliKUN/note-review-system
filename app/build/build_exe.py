@@ -24,7 +24,11 @@ def _python() -> str:
 
 PY = _python()
 NAME = "笔记审查总结系统"
+# 输出目录可以用环境变量指定：默认 build/dist；想保留上一次产物做对比时
+# 换一个空目录即可，避免 PyInstaller 为了清空 dist 去批量删除旧文件。
+DIST = os.environ.get("NR_DIST") or os.path.join(ROOT, "build", "dist")
 print("python:", PY, flush=True)
+print("dist:", DIST, flush=True)
 
 cmd = [
     PY, "-m", "PyInstaller",
@@ -42,15 +46,17 @@ cmd = [
     "--hidden-import", "backend.docmodel",
     "--hidden-import", "backend.history",
     "--hidden-import", "backend.llm",
+    "--hidden-import", "backend.logs",
     "--hidden-import", "backend.media",
     "--hidden-import", "backend.pipeline",
     "--hidden-import", "backend.relayout",
+    "--hidden-import", "backend.report",
     "--hidden-import", "backend.review",
     "--hidden-import", "backend.server",
     "--exclude-module", "playwright",
     "--exclude-module", "numpy",
     "--exclude-module", "pytest",
-    "--distpath", os.path.join(ROOT, "build", "dist"),
+    "--distpath", DIST,
     "--workpath", os.path.join(ROOT, "build", "pywork"),
     "--specpath", os.path.join(ROOT, "build"),
     os.path.join(ROOT, "app", "main.py"),
@@ -60,7 +66,7 @@ print("building...", flush=True)
 r = subprocess.run(cmd, cwd=ROOT)
 print("exit", r.returncode, flush=True)
 
-out = os.path.join(ROOT, "build", "dist", NAME)
+out = os.path.join(DIST, NAME)
 if os.path.isdir(out):
     total = 0
     for dp, _, fs in os.walk(out):
