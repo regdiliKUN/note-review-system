@@ -2066,5 +2066,69 @@ class TestEditAndEstimate(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 内容归纳导出
+class TestSummaryExport(unittest.TestCase):
+    def _api(self, tmp):
+        from backend.api import Api
+        api = Api(workdir=tmp, get_window=lambda: None,
+                  asset_root=os.path.join(tmp, "assets"))
+        api.set_history_dir(os.path.join(tmp, "hist"))
+        src = os.path.join(tmp, "n.txt")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("标题\n\n第一句。\n")
+        api.load(src)
+        return api
+
+    def test_summary_markdown(self):
+        from backend import report
+        doc = {"title": "笔记", "blocks": index([para(txt("内容。"))])}
+        md = report.summary_markdown(doc, {
+            "summary": "概括", "key_points": ["a", "b"],
+            "outline": ["一"], "gaps": ["缺 X"]})
+        self.assertIn("# 笔记", md)
+        self.assertIn("## 摘要", md)
+        self.assertIn("- a", md)
+        self.assertIn("## 建议补充", md)
+        self.assertIn("缺 X", md)
+
+    def test_summary_markdown_empty(self):
+        from backend import report
+        md = report.summary_markdown({"title": "空", "blocks": []}, {})
+        self.assertIn("# 空", md)
+        self.assertNotIn("## 摘要", md)
+
+    def test_summary_html_escapes(self):
+        from backend import report
+        html = report.summary_html({"title": "<b>x</b>", "blocks": []},
+                                   {"summary": "<script>y</script>"})
+        self.assertNotIn("<script>y", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_api_exports_summary(self):
+        tmp = tempfile.mkdtemp(prefix="nr_sum_")
+        try:
+            api = self._api(tmp)
+            api.summary = {"summary": "摘要文字", "key_points": ["要点一"]}
+            for fmt, ext in (("md", ".md"), ("html", ".html")):
+                out = os.path.join(tmp, "out", "sum" + ext)
+                r = api.export("summary", fmt, out)
+                self.assertTrue(r["ok"], r.get("error"))
+                body = open(out, encoding="utf-8").read()
+                self.assertIn("摘要文字", body)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_api_summary_requires_data(self):
+        tmp = tempfile.mkdtemp(prefix="nr_sum2_")
+        try:
+            api = self._api(tmp)
+            api.summary = {}
+            r = api.export("summary", "md", os.path.join(tmp, "x.md"))
+            self.assertFalse(r["ok"])
+            self.assertIn("内容归纳", r["error"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

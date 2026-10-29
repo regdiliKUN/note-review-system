@@ -650,6 +650,12 @@ function wire() {
     if ((kind === 'report' || kind === 'csv') && !S.p.anns.length) {
       return toast('还没有批注，先跑一次 AI 审查再导出报告', 'err');
     }
+    if (kind === 'summary') {
+      const sm = S.p.summary || {};
+      if (!sm.summary && !(sm.key_points || []).length) {
+        return toast('还没有内容归纳，先跑一次 AI 审查', 'err');
+      }
+    }
     const r = await window.pywebview.api.choose_export_path(kind);
     if (!r.ok) return;
     const res = await window.pywebview.api.export(kind, fmt, r.path);
@@ -787,6 +793,7 @@ function wire() {
     if (e.key === '3') switchView('revised');
     if (e.key === '4') switchView('relayout');
     if (e.key === '5') switchView('images');
+    if (e.key === '6') switchView('summary');
     if (e.key === '/') { e.preventDefault(); $('#annSearch').focus(); return; }
     if (e.key === '?') { e.preventDefault(); $('#keysMask').classList.add('on'); return; }
 
@@ -901,6 +908,14 @@ function renderAll() {
   renderDoc();
   const hasLayout = !!p.views.relayout;
   $('#tabLayoutOff').style.display = hasLayout ? 'none' : '';
+  const sm = p.summary || {};
+  const hasSum = !!(sm.summary || (sm.key_points || []).length
+    || (sm.outline || []).length || (sm.gaps || []).length);
+  const sumEl = $('#tabSumState');
+  if (sumEl) {
+    sumEl.style.display = hasSum ? 'none' : '';
+    sumEl.textContent = '未生成';
+  }
 }
 
 function renderDocInfo() {
@@ -1025,6 +1040,13 @@ function renderDoc() {
     return;
   }
 
+  if (S.view === 'summary') {
+    renderSummary(paper);
+    renderToc();
+    wrap.scrollTop = S.scrollMem[S.view] || 0;
+    return;
+  }
+
   if (S.view === 'relayout') {
     const rl = p.views.relayout;
     if (!rl) {
@@ -1080,8 +1102,99 @@ function renderDoc() {
   wrap.scrollTop = S.scrollMem[S.view] || 0;
 }
 
-/* ────────────────────────── 图像审查视图 ────────────────────────── */
+/* ────────────────────────── 内容归纳视图 ────────────────────────── */
+function summaryMarkdown() {
+  const s = (S.p && S.p.summary) || {};
+  const L = [`# ${S.p.doc.title}`, ''];
+  if (s.summary) L.push('## 摘要', '', s.summary, '');
+  const sec = (t, arr) => {
+    if (!arr || !arr.length) return;
+    L.push(`## ${t}`, '');
+    arr.forEach(x => L.push(`- ${x}`));
+    L.push('');
+  };
+  sec('要点', s.key_points);
+  sec('建议结构', s.outline);
+  sec('建议补充', s.gaps);
+  return L.join('\n');
+}
+
+function renderSummary(paper) {
+  const s = (S.p && S.p.summary) || {};
+  const has = s.summary || (s.key_points && s.key_points.length)
+    || (s.outline && s.outline.length) || (s.gaps && s.gaps.length);
+  if (!has) {
+    const reviewed = !!(S.p && S.p.anns && S.p.anns.length);
+    paper.innerHTML = `<div class="sum-empty">
+      <div class="sum-empty-ico">◈</div>
+      <p class="sum-empty-t">还没有内容归纳</p>
+      <p class="sum-empty-s">${reviewed
+        ? '本次审查没有生成归纳结果（可能是模型未返回，或审查被中途取消）。重新审查一次即可补齐。'
+        : '点击「开始 AI 审查」，系统会在逐条批注之外，再给出一份整篇的内容归纳。'}</p>
+    </div>`;
+    return;
+  }
+  const ir = S.p.imageReport || {};
+  const flagged = (ir.items || []).filter(it => it.sensitive || it.inconsistent || it.needs_check);
+  const stat = S.p.stats || {};
+
+  let html = '<div class="sum-head">';
+  html += `<div class="sum-title">内容归纳</div>`;
+  html += `<div class="sum-sub">基于 ${S.p.doc.blocks} 段 / ${S.p.doc.images} 张图片`
+    + (s.map_reduce ? ` · 长文档分段提炼（覆盖 ${s.covered || 0} 字要点）` : '')
+    + `　·　本次共 ${stat.total || 0} 条批注</div>`;
+  html += `<button class="mini-btn" id="btnSumCopy">复制为 Markdown</button>`;
+  html += '</div>';
+
+  if (s.summary) {
+    html += `<div class="sum-card sum-lead">
+      <div class="sum-label">摘要</div>
+      <div class="sum-body">${esc(s.summary)}</div>
+    </div>`;
+  }
+
+  const list = (title, arr, cls, empty) => {
+    if (!arr || !arr.length) return '';
+    return `<div class="sum-card">
+      <div class="sum-label ${cls}">${title}</div>
+      <ul class="sum-list">${arr.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+    </div>`;
+  };
+  html += list('要点', s.key_points, 'k');
+  html += list('建议结构', s.outline, 'o');
+  html += list('建议补充', s.gaps, 'g');
+
+  if (flagged.length) {
+    html += `<div class="sum-card">
+      <div class="sum-label g">需关注的图片（${flagged.length}）</div>
+      <ul class="sum-list">${flagged.slice(0, 12).map(it =>
+        `<li>图${it.index}：${esc(it.caption || '无说明')}
+           <span class="sum-dim">${esc(it.position || '')}</span></li>`).join('')}</ul>
+    </div>`;
+  }
+
+  html += `<div class="sum-foot">
+    <button class="btn btn-ghost btn-sm" id="btnSumToRelayout">在重排版中带上归纳</button>
+  </div>`;
+  paper.innerHTML = html;
+
+  const copy = $('#btnSumCopy');
+  if (copy) copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(summaryMarkdown());
+      toast('归纳内容已复制为 Markdown', 'ok');
+    } catch (e) { toast('复制失败：' + e, 'err'); }
+  };
+  const toRl = $('#btnSumToRelayout');
+  if (toRl) toRl.onclick = () => {
+    if (S.relayout) { switchView('relayout'); return; }
+    $('#chkRelayout').checked = true;
+    $('#chkRelayout').dispatchEvent(new Event('change'));
+  };
+}
 const IMG_PAGE = 40;
+
+/* ────────────────────────── 图像审查视图 ────────────────────────── */
 
 function renderImages(paper, docId, am) {
   const ir = S.p.imageReport || { items: [] };

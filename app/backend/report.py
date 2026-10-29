@@ -307,6 +307,84 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     return "\n".join(L)
 
 
+def summary_markdown(doc: Dict[str, Any], summary: Dict[str, Any],
+                     image_report: Dict[str, Any] | None = None) -> str:
+    """只导出「内容归纳」这一块（不含逐条批注），便于贴进周报或知识库。"""
+    s = summary or {}
+    ir = image_report or {}
+    L = [f"# {doc.get('title') or '未命名笔记'}", ""]
+    meta = [f"段落 {len(doc.get('blocks') or [])}"]
+    if ir.get("total"):
+        meta.append(f"图片 {ir['total']} 张")
+    meta.append(time.strftime("%Y-%m-%d %H:%M"))
+    L += ["> " + "　·　".join(meta), ""]
+    if s.get("summary"):
+        L += ["## 摘要", "", s["summary"], ""]
+    for key, label in (("key_points", "要点"), ("outline", "建议结构"), ("gaps", "建议补充")):
+        arr = s.get(key) or []
+        if arr:
+            L.append(f"## {label}")
+            L.append("")
+            L += [f"- {x}" for x in arr]
+            L.append("")
+    flagged = [it for it in (ir.get("items") or [])
+               if it.get("sensitive") or it.get("inconsistent") or it.get("needs_check")]
+    if flagged:
+        L += ["## 需关注的图片", ""]
+        for it in flagged[:20]:
+            note = "；".join(x for x in (it.get("sensitive_note"), it.get("inconsistent_note"),
+                                         it.get("check_note")) if x) or "需人工核对"
+            L.append(f"- 图{it.get('index')}（{it.get('position') or ''}）："
+                     f"{it.get('caption') or '无说明'} —— {note}")
+        L.append("")
+    L.append("---")
+    L.append("_由「笔记审查总结系统」生成_")
+    return "\n".join(L)
+
+
+def summary_html(doc: Dict[str, Any], summary: Dict[str, Any],
+                 image_report: Dict[str, Any] | None = None) -> str:
+    s = summary or {}
+    ir = image_report or {}
+
+    def ul(arr, cls=""):
+        if not arr:
+            return ""
+        return (f'<ul class="sum-list {cls}">'
+                + "".join(f"<li>{escape(x)}</li>" for x in arr) + "</ul>")
+
+    flagged = [it for it in (ir.get("items") or [])
+               if it.get("sensitive") or it.get("inconsistent") or it.get("needs_check")]
+    img = ""
+    if flagged:
+        img = ('<div class="card"><h2>需关注的图片</h2><ul class="sum-list">'
+               + "".join(
+                   f"<li>图{it.get('index')}（{escape(it.get('position') or '')}）："
+                   f"{escape(it.get('caption') or '无说明')} —— "
+                   + escape("；".join(x for x in (it.get("sensitive_note"),
+                                                  it.get("inconsistent_note"),
+                                                  it.get("check_note")) if x) or "需人工核对")
+                   + "</li>" for it in flagged[:20])
+               + "</ul></div>")
+    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>内容归纳 · {escape(doc.get('title') or '')}</title><style>{_CSS}</style></head><body>
+<div class="wrap">
+  <div class="card">
+    <h1>内容归纳 · {escape(doc.get('title') or '未命名笔记')}</h1>
+    <div class="sub">段落 {len(doc.get('blocks') or [])}
+      {('　·　图片 ' + str(ir.get('total'))) if ir.get('total') else ''}
+      　·　{escape(time.strftime('%Y-%m-%d %H:%M'))}</div>
+  </div>
+  {f'<div class="card"><h2>摘要</h2><p>{escape(s["summary"])}</p></div>' if s.get('summary') else ''}
+  {f'<div class="card"><h2>要点</h2>{ul(s.get("key_points"))}</div>' if s.get('key_points') else ''}
+  {f'<div class="card"><h2>建议结构</h2>{ul(s.get("outline"))}</div>' if s.get('outline') else ''}
+  {f'<div class="card"><h2>建议补充</h2>{ul(s.get("gaps"))}</div>' if s.get('gaps') else ''}
+  {img}
+  <div class="foot">由「笔记审查总结系统」生成</div>
+</div></body></html>"""
+
+
 # ---------------------------------------------------------------- CSV
 def to_csv(anns: List[Dict[str, Any]]) -> str:
     """批注清单 CSV。用 utf-8-sig，Excel 双击打开不乱码。"""

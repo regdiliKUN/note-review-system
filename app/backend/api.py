@@ -1159,7 +1159,8 @@ class Api:
             return {"ok": False}
         base = os.path.splitext(os.path.basename(self.doc["path"]))[0]
         suffix = {"original": "_原版", "revised": "_修正版", "relayout": "_重排版",
-                  "report": "_审阅报告", "csv": "_批注清单"}.get(kind, "_修正版")
+                  "report": "_审阅报告", "csv": "_批注清单",
+                  "summary": "_内容归纳"}.get(kind, "_修正版")
         default = base + suffix + time.strftime("_%Y%m%d", time.localtime())
         types = ("Word 文档 (*.docx)", "网页 (*.html)",
                  "Markdown (*.md)", "纯文本 (*.txt)", "CSV 表格 (*.csv)")
@@ -1180,8 +1181,8 @@ class Api:
     def export(self, kind: str, fmt: str, out_path: str) -> dict:
         if not self.doc:
             return {"ok": False, "error": "没有可导出的内容"}
-        # 审阅报告 / 批注清单是独立的交付物，不走正文导出链路
-        if kind in ("report", "csv"):
+        # 审阅报告 / 内容归纳 / 批注清单是独立的交付物，不走正文导出链路
+        if kind in ("report", "csv", "summary"):
             return self._export_report(kind, fmt, out_path)
         blocks = self._blocks_for(kind)
         if not blocks:
@@ -1223,7 +1224,7 @@ class Api:
         return {"ok": True, "path": out_path, "format": fmt}
 
     def _export_report(self, kind: str, fmt: str, out_path: str) -> dict:
-        """导出审阅报告（html / md）或批注清单（csv）。"""
+        """导出审阅报告（html / md）、内容归纳（html / md）或批注清单（csv）。"""
         fmt = (fmt or "html").lower().lstrip(".")
         if kind == "csv":
             fmt = "csv"
@@ -1243,6 +1244,14 @@ class Api:
         try:
             if fmt == "csv":
                 rpt.write_csv(self.anns, out_path)
+            elif kind == "summary":
+                if not (self.summary or {}).get("summary") and not (self.summary or {}).get("key_points"):
+                    return {"ok": False, "error": "还没有内容归纳，请先完成一次审查"}
+                body = (rpt.summary_html(self.doc, self.summary, self.image_report)
+                        if fmt == "html"
+                        else rpt.summary_markdown(self.doc, self.summary, self.image_report))
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(body)
             else:
                 rep = rpt.collect(
                     self.doc, self.anns, self.summary, self.image_report,
@@ -1256,6 +1265,7 @@ class Api:
         except Exception as e:
             self._err(f"导出报告失败：{out_path}")
             return {"ok": False, "error": f"导出报告失败：{e}"}
+        return {"ok": True, "path": out_path, "format": fmt}
         return {"ok": True, "path": out_path, "format": fmt}
 
     def _blocks_for(self, kind: str):

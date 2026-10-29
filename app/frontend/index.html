@@ -121,6 +121,10 @@
           <button class="tab" data-view="revised">
             <span class="tab-ico">✓</span> 修正后版本
           </button>
+          <button class="tab" data-view="summary">
+            <span class="tab-ico">◈</span> 内容归纳
+            <em id="tabSumState" style="display:none">未生成</em>
+          </button>
           <button class="tab" data-view="relayout">
             <span class="tab-ico">⧉</span> 重新排版
             <em class="off" id="tabLayoutOff">未启用</em>
@@ -257,6 +261,7 @@
           <div class="menu-sep"></div>
           <button data-fmt="html" data-kind="report">审阅报告 · 网页（可打印）</button>
           <button data-fmt="md" data-kind="report">审阅报告 · Markdown</button>
+          <button data-fmt="md" data-kind="summary">内容归纳 · Markdown</button>
           <button data-fmt="csv" data-kind="csv">批注清单 · CSV（Excel 可开）</button>
         </div>
       </div>
@@ -485,7 +490,7 @@
     </div>
     <div class="modal-body">
       <div class="keys-grid">
-        <span>切换视图</span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd><kbd>5</kbd>
+        <span>切换视图</span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd><kbd>5</kbd><kbd>6</kbd>
         <span>下一条 / 上一条批注</span><kbd>J</kbd><kbd>K</kbd>
         <span>保留当前批注</span><kbd>A</kbd>
         <span>丢弃当前批注</span><kbd>R</kbd>
