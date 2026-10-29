@@ -5,7 +5,7 @@ import os
 import sys
 
 APP_NAME = "笔记审查总结系统"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 
 def code_dir() -> str:

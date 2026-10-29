@@ -3010,5 +3010,86 @@ class TestStaticServer(unittest.TestCase):
         self.assertEqual(h.get("X-Content-Type-Options"), "nosniff")
 
 
+class TestEndToEndSmoke(unittest.TestCase):
+    """用仓库里的示例笔记跑一遍完整链路：解析 → 审查 → 各格式导出。
+
+    单元测试都过、但整条链路跑不通，是这类桌面应用最常见的翻车方式。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nr_e2e_")
+        self.sample = os.path.join(os.path.dirname(HERE), "示例笔记.docx")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_sample_exists(self):
+        self.assertTrue(os.path.isfile(self.sample), "仓库应带一份示例笔记")
+
+    def test_full_pipeline(self):
+        if not os.path.isfile(self.sample):
+            self.skipTest("示例笔记缺失")
+        from backend.api import Api
+        os.makedirs(os.path.join(self.tmp, "assets"), exist_ok=True)
+        api = Api(workdir=self.tmp, get_window=lambda: None,
+                  asset_root=os.path.join(self.tmp, "assets"))
+        api.set_history_dir(os.path.join(self.tmp, "hist"))
+
+        r = api.load(self.sample)
+        self.assertTrue(r["ok"], r)
+        self.assertGreater(r["doc"]["blocks"], 3)
+        self.assertGreater(r["doc"]["images"], 0, "示例笔记应含图片")
+
+        # 用 mock 模型跑一次审查
+        def fn(system, user):
+            bid = "b1"
+            for tok in user.split():
+                if tok.startswith("[b") and "｜" in tok:
+                    bid = tok[1:tok.index("｜")]
+                    break
+            return json.dumps({"annotations": [
+                {"block_id": bid, "sid": 0, "op": "replace_sentence",
+                 "type": "表达优化", "replacement": "这是一句被改写后的示例句子。",
+                 "reason": "示例批注理由"}]}, ensure_ascii=False)
+
+        api._llm = lambda: MockLLM(fn=fn)
+        rev = api.run_review(do_summary=False)
+        self.assertTrue(rev["ok"], rev)
+        self.assertGreater(len(rev["anns"]), 0)
+
+        # 各格式导出
+        for fmt in ("docx", "html", "md", "txt"):
+            out = os.path.join(self.tmp, f"out.{fmt}")
+            res = api.export("revised", fmt, out)
+            self.assertTrue(res["ok"], (fmt, res))
+            self.assertGreater(os.path.getsize(out), 100, fmt)
+
+        # 批注版
+        cm = os.path.join(self.tmp, "cm.docx")
+        res = api.export("commented", "docx", cm)
+        self.assertTrue(res["ok"], res)
+        import zipfile
+        self.assertIn("word/comments.xml", zipfile.ZipFile(cm).namelist())
+
+        # 重排版（含 Word 目录域）
+        api.set_relayout(True)
+        rl = os.path.join(self.tmp, "rl.docx")
+        res = api.export("relayout", "docx", rl)
+        self.assertTrue(res["ok"], res)
+        d = zipfile.ZipFile(rl).read("word/document.xml").decode()
+        self.assertIn("TOC", d)
+
+        # 审阅报告
+        rep = os.path.join(self.tmp, "report.html")
+        res = api.export("report", "html", rep)
+        self.assertTrue(res["ok"], res)
+        self.assertIn("批注", open(rep, encoding="utf-8").read())
+
+        # 历史已落盘，重新导入应自动恢复
+        again = api.load(self.sample)
+        self.assertTrue(again["ok"])
+        self.assertGreater(len(again["anns"]), 0, "再次打开应自动载入上次结果")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
