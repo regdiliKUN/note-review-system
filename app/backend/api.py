@@ -63,6 +63,30 @@ def _app_version() -> str:
         return "2.0.0"
 
 
+def parse_glossary_text(text: str) -> list:
+    """把用户导入的文本切成术语列表。
+
+    先按行处理，再按逗号/顿号/分号/制表符细分。三类噪声会被丢掉：
+    以 # 开头的注释行、明显是正文的长句（含句末标点或整行过长）、
+    以及切出来过长的片段 —— 否则用户误把一整段笔记粘进来，
+    术语白名单会被几十个半句塞满，反而让模型不敢改任何东西。
+    """
+    out: list = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if len(line) > 60 or re.search(r"[。！？…]", line):
+            continue
+        for x in re.split(r"[,，、;；\t]+", line):
+            x = x.strip().strip('"').strip("'")
+            if not x or x.startswith("#") or len(x) > 30:
+                continue
+            if x not in out:
+                out.append(x)
+    return out
+
+
 class Api:
     def __init__(self, workdir: str, get_window, asset_root: str):
         self.workdir = workdir
@@ -617,6 +641,9 @@ class Api:
         self.anns = anns
         self.summary = snap.get("summary") or {}
         self.image_report = snap.get("image_report") or {}
+        # 恢复「哪些段落上次没审到」，重开文件后仍能一键补审
+        self._last_failed_blocks = [b for b in (snap.get("failed_blocks") or [])
+                                    if b in ids] if ids else []
         self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
         self._rebuild_relayout()
         return len(anns), dropped
@@ -922,6 +949,7 @@ class Api:
             "vision": self._vision_status(),
             "busy": self.busy,
             "history": self._history_block(),
+            "failedBlocks": list(self._last_failed_blocks),
         }
         if self.relaid:
             payload["views"]["relayout"] = {
@@ -1159,6 +1187,76 @@ class Api:
             self.busy = False
             return {"ok": False, "error": f"审查出错：{e}"}
 
+    def retry_failed(self) -> dict:
+        """只补审上次失败的段落，其余段落已采纳的判断原样保留。
+
+        没有这个入口时，一段失败就意味着用户只能在「整篇重审（几十分钟）」
+        和「接受一份缺角的结果」之间二选一。
+        """
+        if not self.doc:
+            return {"ok": False, "error": "请先导入笔记"}
+        if self.busy:
+            return {"ok": False, "error": "正在处理中，请稍候"}
+        ids = {b["id"] for b in self.doc["blocks"]}
+        todo = [b for b in (self._last_failed_blocks or []) if b in ids]
+        if not todo:
+            return {"ok": False, "error": "没有待补审的段落（上次审查没有失败分块）"}
+
+        llm = self._llm()
+        if not self.cfg.get("model"):
+            h = llm.health()
+            if h.get("models"):
+                self.cfg["model"] = h["models"][0]
+                llm.model = self.cfg["model"]
+            else:
+                return {"ok": False, "error": "未检测到可用模型，请先启动 Ollama"}
+
+        self.busy = True
+        self._cancel.clear()
+        t0 = time.time()
+        todo_set = set(todo)
+
+        def prog(msg, pct):
+            self._push("progress", {"msg": msg, "pct": round(pct, 3)})
+
+        try:
+            prog(f"正在补审 {len(todo)} 个段落…", 0.05)
+            rep: dict = {}
+            new_anns = review_document(
+                self.doc, llm, on_progress=prog, report=rep,
+                level=str(self.cfg.get("review_level") or "normal"),
+                glossary=self.cfg.get("glossary") or [],
+                should_stop=self._cancel.is_set,
+                only_ids=todo_set,
+                scenario=str(self.cfg.get("review_scenario") or "general"),
+                concurrency=int(self.cfg.get("review_concurrency", 1) or 1),
+                max_per_block=int(self.cfg.get("review_max_per_block", 0) or 0))
+            # 只替换「被补审段落」上的旧批注，其他段落的处理结果必须保住
+            keep = [a for a in self.anns if a.get("block_id") not in todo_set]
+            self.anns = review.finalize(keep + new_anns)
+            self._last_failed_blocks = sorted({
+                bid for f in (rep.get("failed") or []) for bid in (f.get("blocks") or [])
+            })
+            self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
+            self._rebuild_relayout()
+            elapsed = round(time.time() - t0, 1)
+            self._save_history(elapsed)
+            prog("补审完成", 1.0)
+            warnings = []
+            if self._last_failed_blocks:
+                warnings.append(f"仍有 {len(self._last_failed_blocks)} 个段落没审成功，可稍后再试。")
+            return self._payload(extra={
+                "reviewed": True, "retried": len(todo), "elapsed": elapsed,
+                "reviewReport": rep, "warnings": warnings,
+            })
+        except LLMError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            self._err("补审失败")
+            return {"ok": False, "error": f"补审出错：{e}"}
+        finally:
+            self.busy = False
+
     def add_manual_note(self, block_id: str, text: str, typ: str = "存疑待核") -> dict:
         """用户自己加一条批注。
 
@@ -1314,6 +1412,60 @@ class Api:
                 "glossary": self.cfg.get("glossary", []),
                 "reviewConcurrency": int(self.cfg.get("review_concurrency", 1) or 1),
                 "reviewMaxPerBlock": int(self.cfg.get("review_max_per_block", 0) or 0)}
+
+    def export_glossary(self) -> dict:
+        """把术语白名单导出成一行一个的 txt，方便在几台机器/几个人之间共用。"""
+        terms = [str(t) for t in (self.cfg.get("glossary") or []) if str(t).strip()]
+        if not terms:
+            return {"ok": False, "error": "术语白名单还是空的，没有可导出的内容"}
+        win = self.get_window()
+        if not win:
+            return {"ok": False}
+        try:
+            import webview
+            res = win.create_file_dialog(
+                webview.SAVE_DIALOG, save_filename="术语白名单",
+                file_types=("文本文件 (*.txt)",))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not res:
+            return {"ok": False, "canceled": True}
+        path = res if isinstance(res, str) else res[0]
+        if not path.lower().endswith(".txt"):
+            path += ".txt"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(terms) + "\n")
+        except Exception as e:
+            return {"ok": False, "error": f"写入失败：{e}"}
+        return {"ok": True, "path": path, "count": len(terms)}
+
+    def import_glossary(self) -> dict:
+        """从 txt / md 导入术语，与现有白名单合并去重。"""
+        win = self.get_window()
+        if not win:
+            return {"ok": False}
+        try:
+            import webview
+            res = win.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=False,
+                file_types=("文本文件 (*.txt;*.md;*.csv)", "所有文件 (*.*)"))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not res:
+            return {"ok": False, "canceled": True}
+        path = res[0] if isinstance(res, (list, tuple)) else res
+        try:
+            text = docmodel._read_text_auto(path)
+        except Exception as e:
+            return {"ok": False, "error": f"读取失败：{e}"}
+        incoming = parse_glossary_text(text)
+        cur = list(self.cfg.get("glossary") or [])
+        added = [x for x in incoming if x not in cur]
+        self.cfg["glossary"] = (cur + added)[:200]
+        self._save_cfg()
+        return {"ok": True, "added": len(added), "total": len(self.cfg["glossary"]),
+                "glossary": self.cfg["glossary"]}
 
     def _rebuild_relayout(self):
         if not self.relayout_on or not self.doc:

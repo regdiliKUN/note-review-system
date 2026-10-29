@@ -121,6 +121,9 @@
           <button class="tab" data-view="revised">
             <span class="tab-ico">✓</span> 修正后版本
           </button>
+          <button class="tab" data-view="compare">
+            <span class="tab-ico">⇄</span> 对比
+          </button>
           <button class="tab" data-view="summary">
             <span class="tab-ico">◈</span> 内容归纳
             <em id="tabSumState" style="display:none">未生成</em>
@@ -189,6 +192,7 @@
           </div>
         </div>
         <div class="paper" id="paper" style="display:none"></div>
+        <div class="density" id="density" style="display:none" aria-label="批注密度导航"></div>
       </div>
     </main>
 
@@ -292,7 +296,7 @@
   <div class="modal">
     <div class="modal-head">
       <h3>设置</h3>
-      <button class="icon-btn" id="btnCloseSettings">✕</button>
+      <button class="icon-btn" id="btnCloseSettings" aria-label="关闭设置">✕</button>
     </div>
     <div class="modal-body">
       <div class="field">
@@ -363,7 +367,11 @@
         <label>术语白名单（不会被当成错别字改掉）</label>
         <textarea id="inpGlossary" rows="2"
                   placeholder="用顿号、逗号或换行分隔，例如：DynaMesh、SubTool、UV"></textarea>
-        <div class="hint">专有名词、自造缩写、团队内部叫法写在这里，模型不会去「纠正」它们。</div>
+        <div class="diag-actions" style="margin-top:6px">
+          <button class="btn btn-ghost btn-sm" id="btnImportGlossary">从文件导入</button>
+          <button class="btn btn-ghost btn-sm" id="btnExportGlossary">导出为文件</button>
+        </div>
+        <div class="hint">专有名词、自造缩写、团队内部叫法写在这里，模型不会去「纠正」它们。导入/导出是一行一个词的 txt，方便多台机器共用。</div>
       </div>
       <div class="field">
         <label>审查吞吐</label>
@@ -428,7 +436,7 @@
   <div class="modal modal-wide">
     <div class="modal-head">
       <h3>审查历史</h3>
-      <button class="icon-btn" id="btnCloseHistory">✕</button>
+      <button class="icon-btn" id="btnCloseHistory" aria-label="关闭审查历史">✕</button>
     </div>
     <div class="modal-body">
       <div class="hist-loc">

@@ -142,6 +142,7 @@ t('SEV_RANK 顺序', () => {
 const fs = require('node:fs');
 const html = fs.readFileSync(path.join(ROOT, 'app', 'frontend', 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(ROOT, 'app', 'frontend', 'app.js'), 'utf8');
+const libJs = fs.readFileSync(path.join(ROOT, 'app', 'frontend', 'lib.js'), 'utf8');
 
 const htmlIds = new Set([...html.matchAll(/\bid="([\w-]+)"/g)].map(m => m[1]));
 // 有些节点是 JS 动态生成的（例如「加载更多」按钮），它们的 id 写在模板字符串里
@@ -177,6 +178,79 @@ t('app.js 不再重复声明 lib.js 里的符号', () => {
 t('没有残留的 console.log 调试输出', () => {
   const hits = [...appJs.matchAll(/^\s*console\.log\(/gm)];
   assert.deepEqual(hits.map(h => h[0].trim()), []);
+});
+
+/* ── blockText / diffBlocks / densityBuckets ── */
+const T = v => ({ k: 't', v });
+const IMG = { k: 'i', img: { file: 'a.png' } };
+
+t('blockText 拼文本并把图片记成占位符', () => {
+  assert.equal(lib.blockText([T('甲'), IMG, T('乙')]), '甲⟦图⟧乙');
+  assert.equal(lib.blockText([]), '');
+  assert.equal(lib.blockText(null), '');
+});
+
+t('diffBlocks 识别改动段落', () => {
+  const orig = [{ id: 'b0', kind: 'para', tokens: [T('原句。')] },
+                { id: 'b1', kind: 'para', tokens: [T('没变。')] }];
+  const rev = [{ id: 'b0', kind: 'para', tokens: [T('新句。')] },
+               { id: 'b1', kind: 'para', tokens: [T('没变。')] }];
+  const rows = lib.diffBlocks(orig, rev);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].changed, true);
+  assert.equal(rows[1].changed, false);
+  assert.equal(rows[0].id, 'b0');
+});
+
+t('diffBlocks 长度不一致也不崩', () => {
+  const rows = lib.diffBlocks([{ id: 'b0', kind: 'para', tokens: [T('x')] }], []);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].right, '');
+  assert.equal(rows[0].changed, true);
+});
+
+t('diffBlocks 保留 token 供高亮渲染', () => {
+  const tk = [{ k: 'ins', v: '新增', op: 'a1', type: '知识补充' }];
+  const rows = lib.diffBlocks([], [{ id: 'b0', kind: 'para', tokens: tk }]);
+  assert.deepEqual(rows[0].rightTokens, tk);
+});
+
+t('densityBuckets 聚合严重度', () => {
+  const blocks = [{ id: 'b0' }, { id: 'b1' }, { id: 'b2' }];
+  const anns = [
+    { block_id: 'b0', severity: 'high' },
+    { block_id: 'b0', severity: 'low' },
+    { block_id: 'b2', severity: 'medium' }
+  ];
+  const d = lib.densityBuckets(blocks, anns, 3);
+  assert.equal(d.length, 3);
+  assert.equal(d[0].count, 2);
+  assert.equal(d[0].high, 1);
+  assert.equal(d[0].low, 1);
+  assert.equal(d[1].count, 0);
+  assert.equal(d[2].medium, 1);
+});
+
+t('densityBuckets 桶数不超过段落数', () => {
+  const blocks = [{ id: 'b0' }, { id: 'b1' }];
+  assert.equal(lib.densityBuckets(blocks, [], 80).length, 2);
+  assert.deepEqual(lib.densityBuckets([], [], 80), []);
+});
+
+t('densityBuckets 无批注时计数全零', () => {
+  const d = lib.densityBuckets([{ id: 'b0' }], [], 10);
+  assert.equal(d[0].count, 0);
+  assert.equal(d[0].high + d[0].medium + d[0].low, 0);
+});
+
+t('lib 在浏览器环境挂到 window 上', () => {
+  const src = libJs;
+  assert.ok(/window\.lib\s*=/.test(src), 'lib.js 必须把 API 挂到 window.lib，app.js 才能用 lib.xxx');
+});
+
+t('对比视图与密度条的元素存在于 HTML', () => {
+  assert.ok(/id="density"/.test(html), '缺少密度条容器');
+  assert.ok(/data-view="compare"/.test(html), '缺少对比视图标签');
 });
 
 /* ── 汇总 ── */

@@ -189,7 +189,52 @@ input,select{font-family:inherit;font-size:inherit}
 .switch-lbl{font-size:12px;color:var(--txt-2)}
 
 /* 纸张 */
-.paper-wrap{flex:1;overflow-y:auto;overflow-x:hidden;padding:26px 24px 60px;min-height:0}
+.paper-wrap{flex:1;overflow-y:auto;overflow-x:hidden;padding:26px 24px 60px;min-height:0;position:relative}
+
+/* ── 右侧批注密度导航条 ── */
+.density{
+  position:absolute;right:3px;top:14px;bottom:14px;width:10px;
+  display:flex;flex-direction:column;gap:2px;z-index:6;
+}
+.density .dns{
+  flex:1;position:relative;min-height:2px;border-radius:2px;
+  background:transparent;padding:0;cursor:pointer;
+}
+.density .dns::after{
+  content:'';position:absolute;left:0;right:0;bottom:0;
+  height:var(--h,0%);background:var(--c,#64748b);border-radius:2px;opacity:.5;
+  transition:opacity .15s;
+}
+.density .dns:hover::after{opacity:1}
+.density .dns.hi{--c:#ef4444}
+.density .dns.md{--c:#f59e0b}
+.density .dns.lo{--c:#64748b}
+
+/* ── 原文 / 修正版对比 ── */
+.cmp-bar{
+  display:flex;align-items:center;gap:12px;margin-bottom:16px;
+  font-size:12.5px;color:var(--paper-muted);
+}
+.cmp-bar b{color:#1b2430}
+.cmp-bar label{display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none}
+.cmp-grid{display:flex;flex-direction:column;gap:2px}
+.cmp-head{
+  display:grid;grid-template-columns:1fr 1fr;gap:16px;
+  font-size:11.5px;letter-spacing:.5px;color:var(--paper-muted);
+  padding:0 8px 6px;font-weight:700;
+}
+.cmp-row{
+  display:grid;grid-template-columns:1fr 1fr;gap:16px;
+  padding:7px 8px;border-radius:6px;border-left:3px solid transparent;
+}
+.cmp-row.chg{background:#fff8e8;border-left-color:#f59e0b}
+.cmp-row:hover{background:#f4f7fd}
+.cmp-row.chg:hover{background:#fdf1da}
+.cmp-cell{font-size:14px;line-height:1.9;color:#2b3341;word-break:break-word}
+.cmp-cell.old{color:#5b6472}
+.cmp-cell.old .d-old,.cmp-cell .d-old{background:#fee2e2;color:#b91c1c;text-decoration:line-through}
+.cmp-cell .d-new{background:#dcfce7;color:#15803d}
+.cmp-row.hl{outline:2px solid var(--accent);outline-offset:1px}
 .paper{
   max-width:840px;margin:0 auto;background:var(--paper);color:var(--paper-txt);
   border-radius:12px;padding:52px 60px 64px;
@@ -850,3 +895,29 @@ textarea:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140
   background:rgba(255,255,255,.08);padding:1px 6px;border-radius:4px;color:#7dd3fc;
 }
 .guide-acts{display:flex;gap:8px;margin-top:12px}
+
+/* ══════════ 键盘可达性 ══════════ */
+/* 鼠标点击不出现焦点框，但用 Tab 键导航时必须看得见当前位置 */
+:focus{outline:none}
+:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+  border-radius:6px;
+}
+.paper :focus-visible{outline-color:#2563eb}
+.density .dns:focus-visible{outline-offset:1px}
+
+/* 屏幕阅读器专用文本 */
+.sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;
+}
+
+/* 尊重系统「减少动效」偏好 */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.001ms !important;
+    transition-duration:.001ms !important;
+    scroll-behavior:auto !important;
+  }
+}

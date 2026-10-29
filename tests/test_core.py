@@ -2615,5 +2615,91 @@ class TestCommentedExportApi(unittest.TestCase):
         self.assertIn("丢弃", r["error"])
 
 
+class TestRetryFailed(unittest.TestCase):
+    """只补审失败段落：已处理好的判断必须原样保留。"""
+
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_rf_")
+        os.makedirs(os.path.join(self.tmp, "assets"), exist_ok=True)
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.src = os.path.join(self.tmp, "n.txt")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("第一段的内容比较长，足够被审查。\n\n"
+                    "第二段的内容比较长，足够被审查。\n\n"
+                    "第三段的内容比较长，足够被审查。\n")
+        self.api.load(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_failed_blocks(self):
+        self.api._last_failed_blocks = []
+        r = self.api.retry_failed()
+        self.assertFalse(r["ok"])
+        self.assertIn("没有待补审", r["error"])
+
+    def test_retry_only_touches_failed_blocks(self):
+        blocks = self.api.doc["blocks"]
+        keep_bid = blocks[0]["id"]
+        fail_bid = blocks[1]["id"]
+        self.api.anns = [{"id": "a1", "block_id": keep_bid, "op": "comment",
+                          "type": "结构建议", "target": "", "replacement": "",
+                          "reason": "保留我", "severity": "low", "status": "accepted",
+                          "anchor": None, "sid": None}]
+        self.api._last_failed_blocks = [fail_bid]
+
+        reply = json.dumps({"annotations": [
+            {"block_id": fail_bid, "sid": 0, "op": "replace_sentence",
+             "type": "表达优化", "replacement": "补审后的句子。", "reason": "r"}]},
+            ensure_ascii=False)
+        self.api._llm = lambda: MockLLM([reply])
+
+        r = self.api.retry_failed()
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["retried"], 1)
+        reasons = [a["reason"] for a in r["anns"]]
+        self.assertIn("保留我", reasons, "未失败段落上的旧批注不能丢")
+        self.assertTrue(any(a["block_id"] == fail_bid for a in r["anns"]))
+        self.assertEqual(r["failedBlocks"], [])
+
+    def test_retry_survives_llm_error(self):
+        self.api._last_failed_blocks = [self.api.doc["blocks"][0]["id"]]
+        self.api._llm = lambda: MockLLM([llm.LLMError("连接失败")])
+        r = self.api.retry_failed()
+        # 补审失败也要有明确结果，而不是抛异常
+        self.assertIn("ok", r)
+        self.assertFalse(self.api.busy)
+
+
+class TestGlossary(unittest.TestCase):
+    def test_parse_separators(self):
+        from backend.api import parse_glossary_text
+        got = parse_glossary_text("DynaMesh、SubTool\nUV,FBX；ZBrush\tABC")
+        self.assertEqual(got, ["DynaMesh", "SubTool", "UV", "FBX", "ZBrush", "ABC"])
+
+    def test_parse_skips_comments_and_prose(self):
+        from backend.api import parse_glossary_text
+        prose = "这是一整句明显不是术语的正文内容，误把笔记正文当术语导进来时应当被忽略掉。"
+        got = parse_glossary_text("# 这是注释\nDynaMesh\n" + prose)
+        self.assertEqual(got, ["DynaMesh"])
+
+    def test_parse_skips_overlong_line_without_punct(self):
+        from backend.api import parse_glossary_text
+        long_line = "甲" * 80
+        self.assertEqual(parse_glossary_text(long_line), [])
+
+    def test_parse_dedupes(self):
+        from backend.api import parse_glossary_text
+        self.assertEqual(parse_glossary_text("A、A、B"), ["A", "B"])
+
+    def test_parse_empty(self):
+        from backend.api import parse_glossary_text
+        self.assertEqual(parse_glossary_text(""), [])
+        self.assertEqual(parse_glossary_text(None), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

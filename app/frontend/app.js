@@ -402,6 +402,19 @@ function updateHistBar(r) {
   S.histKind = kind;
 
   let html = '';
+  const fb = (r && r.failedBlocks) || (S.p && S.p.failedBlocks) || [];
+  if (fb.length && !(r && r.historyLoaded)) {
+    // 有段落没审到：这是最要紧的信息，优先于「已保存历史」之类的提示
+    html = `<span class="hb-ico warn">!</span>
+      <span class="hb-txt">上次审查有 <b>${fb.length}</b> 个段落没能完成（模型超时或中断）。
+        其余段落的结果已经保留，可以只补审这几段。</span>
+      <button class="hb-btn primary" data-act="retry">补审这几段</button>
+      <button class="hb-btn" data-act="review">整篇重审</button>
+      <button class="hb-x" data-act="close">✕</button>`;
+    bar.innerHTML = html;
+    bar.style.display = '';
+    return;
+  }
   if (kind === 'saved') {
     const e = r.historySaved;
     html = `<span class="hb-ico ok">✓</span>
@@ -655,6 +668,7 @@ function wire() {
     const act = b.dataset.act;
     if (act === 'close') { $('#histBar').style.display = 'none'; return; }
     if (act === 'review') { $('#histBar').style.display = 'none'; doReview(); return; }
+    if (act === 'retry') { $('#histBar').style.display = 'none'; doRetryFailed(); return; }
     if (act === 'hist') { openHistory(); return; }
     if (act === 'dir') { window.pywebview.api.open_history_dir(); return; }
   });
@@ -767,6 +781,26 @@ function wire() {
     const r = await window.pywebview.api.open_log();
     if (r && r.ok) toast('已打开日志文件夹', 'ok');
     else toast((r && r.error) || '无法打开', 'err');
+  };
+
+  // 术语白名单导入 / 导出
+  if ($('#btnImportGlossary')) $('#btnImportGlossary').onclick = async () => {
+    const r = await window.pywebview.api.import_glossary();
+    if (!r || r.ok === false) {
+      if (r && !r.canceled) toast(r.error || '导入失败', 'err');
+      return;
+    }
+    if ($('#inpGlossary')) $('#inpGlossary').value = (r.glossary || []).join('、');
+    toast(`已导入 ${r.added} 个术语（共 ${r.total} 个）`,
+      r.added ? 'ok' : '');
+  };
+  if ($('#btnExportGlossary')) $('#btnExportGlossary').onclick = async () => {
+    const r = await window.pywebview.api.export_glossary();
+    if (!r || r.ok === false) {
+      if (r && !r.canceled) toast(r.error || '导出失败', 'err');
+      return;
+    }
+    toast(`已导出 ${r.count} 个术语`, 'ok');
   };
 
   // 导出
@@ -897,6 +931,18 @@ function wire() {
     jumpToBlock(b.dataset.id);
   });
 
+  // 右侧批注密度条：点一下就跳到对应段落
+  $('#density').addEventListener('click', e => {
+    const b = e.target.closest('.dns');
+    if (!b) return;
+    if (S.view === 'compare' || S.view === 'original' || S.view === 'revised') {
+      jumpToBlock(b.dataset.bid);
+      return;
+    }
+    switchView('annotated');
+    setTimeout(() => jumpToBlock(b.dataset.bid), 80);
+  });
+
   // 快捷键
   document.addEventListener('keydown', e => {
     const tag = (e.target.tagName || '').toUpperCase();
@@ -925,6 +971,7 @@ function wire() {
     if (e.key === '3') switchView('revised');
     if (e.key === '4') switchView('relayout');
     if (e.key === '5') switchView('images');
+    if (e.key === '6') switchView('compare');
     if (e.key === '6') switchView('summary');
     if (e.key === '/') { e.preventDefault(); $('#annSearch').focus(); return; }
     if (e.key === '?') { e.preventDefault(); $('#keysMask').classList.add('on'); return; }
@@ -1197,6 +1244,7 @@ function renderDoc() {
   const docId = p.doc.doc_id;
   const am = annMap();
   const paper = $('#paper');
+  renderDensity();
 
   if (S.view === 'images') {
     renderImages(paper, docId, am);
@@ -1209,6 +1257,14 @@ function renderDoc() {
     renderSummary(paper);
     renderToc();
     wrap.scrollTop = S.scrollMem[S.view] || 0;
+    return;
+  }
+
+  if (S.view === 'compare') {
+    renderCompare(paper, docId, am);
+    renderToc();
+    wrap.scrollTop = S.scrollMem[S.view] || 0;
+    applyPaperTheme();
     return;
   }
 
@@ -1266,6 +1322,76 @@ function renderDoc() {
   renderToc();
   wrap.scrollTop = S.scrollMem[S.view] || 0;
   applyPaperTheme();
+}
+
+/* ────────────────────────── 原文 / 修正版对比 ────────────────────────── */
+function renderCompare(paper, docId, am) {
+  const p = S.p;
+  const rows = lib.diffBlocks(p.views.original, p.views.revised);
+  const changed = rows.filter(r => r.changed);
+  const onlyDiff = !!S.onlyDiff;
+  const shown = onlyDiff ? changed : rows;
+
+  let html = `<div class="cmp-bar">
+    <b>${changed.length}</b> 处段落有改动　·　共 ${rows.length} 段
+    <label><input type="checkbox" id="cmpOnlyDiff"${onlyDiff ? ' checked' : ''}> 只看改动</label>
+  </div>`;
+  if (!shown.length) {
+    html += `<div style="text-align:center;padding:60px 20px;color:#8b95a8;font-size:13px">
+      ${onlyDiff ? '没有任何段落被改动。可以切回「全部批注」逐条处理建议。' : '还没有内容。'}</div>`;
+    paper.innerHTML = html;
+    bindCompare();
+    return;
+  }
+  html += '<div class="cmp-head"><div>原文</div><div>修正后</div></div><div class="cmp-grid">';
+  shown.forEach(r => {
+    const lv = Math.min(Math.max(r.level || 1, 1), 4);
+    const tagL = r.kind === 'heading' ? `h${lv}` : 'div';
+    html += `<div class="cmp-row${r.changed ? ' chg' : ''}" data-bid="${esc(r.id)}">
+      <${tagL} class="cmp-cell old">${tokHtml(r.leftTokens, docId, am)}</${tagL}>
+      <${tagL} class="cmp-cell">${tokHtml(r.rightTokens, docId, am)}</${tagL}>
+    </div>`;
+  });
+  html += '</div>';
+  paper.innerHTML = html;
+  bindCompare();
+}
+
+function bindCompare() {
+  const box = $('#cmpOnlyDiff');
+  if (box) box.onchange = () => { S.onlyDiff = box.checked; renderDoc(); };
+  $$('#paper .cmp-row').forEach(el => {
+    el.onclick = e => {
+      if (e.target.closest('[data-op]')) return;
+      $$('#paper .cmp-row').forEach(x => x.classList.toggle('hl', x === el));
+    };
+  });
+}
+
+/* ────────────────────────── 右侧批注密度导航条 ────────────────────────── */
+function renderDensity() {
+  const box = $('#density');
+  if (!box) return;
+  const p = S.p;
+  const skip = S.view === 'images' || S.view === 'summary' || S.view === 'relayout';
+  if (!p || !p.doc || !p.anns.length || skip) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const buckets = lib.densityBuckets(p.views.original, p.anns, 90);
+  if (!buckets.length) { box.style.display = 'none'; return; }
+  const max = Math.max(1, ...buckets.map(b => b.count));
+  box.style.display = '';
+  box.innerHTML = buckets.map(b => {
+    const h = b.count ? Math.max(6, Math.round(b.count / max * 100)) : 0;
+    const cls = b.high ? 'hi' : b.medium ? 'md' : 'lo';
+    const tip = b.count
+      ? `本段附近 ${b.count} 条批注（高 ${b.high} / 中 ${b.medium} / 低 ${b.low}）`
+      : '这一段没有批注';
+    return `<button class="dns ${cls}" data-bid="${esc(b.blockId)}"
+      style="--h:${h}%" title="${esc(tip)}" aria-label="${esc(tip)}"></button>`;
+  }).join('');
 }
 
 /* ────────────────────────── 内容归纳视图 ────────────────────────── */
@@ -1754,6 +1880,40 @@ async function doReview() {
     else handlePayload(r);
   } catch (e) {
     toast('审查失败：' + e, 'err');
+  } finally {
+    S.busy = false;
+    stopTicker();
+    btn.disabled = false;
+    btn.classList.remove('running');
+    $('#btnReviewTxt').textContent = '重新审查';
+    setTimeout(() => $('#progressWrap').classList.remove('on'), 600);
+  }
+}
+
+/* 只补审上次失败的段落：不重跑全文，已处理好的判断全部保留 */
+async function doRetryFailed() {
+  if (!S.p || !S.p.doc) return toast('请先导入文档', 'err');
+  if (S.busy) return toast('正在处理中，请稍候', 'err');
+  const n = ((S.p.failedBlocks) || []).length;
+  S.busy = true;
+  const btn = $('#btnReview');
+  btn.disabled = false;
+  btn.classList.add('running');
+  $('#btnReviewTxt').textContent = '停止审查';
+  $('#progressWrap').classList.add('on');
+  $('#progressFill').style.width = '4%';
+  $('#progressTxt').textContent = `正在补审 ${n} 个段落…`;
+  S.lastMsg = '补审中';
+  startTicker();
+  try {
+    const r = await window.pywebview.api.retry_failed();
+    if (r.ok === false) toast(r.error, 'err');
+    else {
+      handlePayload(r);
+      toast(`已补审 ${r.retried} 个段落`, 'ok');
+    }
+  } catch (e) {
+    toast('补审失败：' + e, 'err');
   } finally {
     S.busy = false;
     stopTicker();

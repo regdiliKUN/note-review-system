@@ -136,9 +136,73 @@ function progressText(pct, elapsedSec, msg) {
   return msg ? `${msg}（${s}）` : s;
 }
 
+/* 把 token 列表拼成纯文本（图片记为占位符），用于「有没有变化」的比较 */
+function blockText(tokens) {
+  return (tokens || []).map(t => (t.k === 'i' ? '\u27e6图\u27e7' : (t.v || ''))).join('');
+}
+
+/* 原文 / 修正版逐段对齐。
+   apply_accepted 不增删 block，所以按下标对齐是安全的；
+   万一长度不一致也照样输出，不会因为一边缺段而整页空白。 */
+function diffBlocks(orig, rev) {
+  const out = [];
+  const n = Math.max((orig || []).length, (rev || []).length);
+  for (let i = 0; i < n; i++) {
+    const a = orig && orig[i];
+    const b = rev && rev[i];
+    const left = a ? blockText(a.tokens) : '';
+    const right = b ? blockText(b.tokens) : '';
+    out.push({
+      id: (a && a.id) || (b && b.id) || ('x' + i),
+      kind: (a && a.kind) || (b && b.kind) || 'para',
+      level: (a && a.level) || 0,
+      leftTokens: (a && a.tokens) || [],
+      rightTokens: (b && b.tokens) || [],
+      left, right,
+      changed: left !== right
+    });
+  }
+  return out;
+}
+
+/* 批注密度：把段落按数量分成若干桶，供右侧迷你导航条使用 */
+function densityBuckets(blocks, anns, buckets = 80) {
+  const n = (blocks || []).length;
+  if (!n) return [];
+  const want = Math.max(1, Math.min(buckets | 0 || 80, n));
+  const per = Math.max(1, Math.ceil(n / want));
+  const byBlock = {};
+  (anns || []).forEach(a => {
+    const k = a && a.block_id;
+    if (!k) return;
+    const cur = byBlock[k] || (byBlock[k] = { count: 0, high: 0, medium: 0, low: 0 });
+    cur.count++;
+    const s = a.severity === 'high' ? 'high' : a.severity === 'low' ? 'low' : 'medium';
+    cur[s]++;
+  });
+  const out = [];
+  for (let i = 0; i < n; i += per) {
+    let count = 0, high = 0, medium = 0, low = 0;
+    for (let j = i; j < Math.min(i + per, n); j++) {
+      const d = byBlock[blocks[j].id];
+      if (!d) continue;
+      count += d.count; high += d.high; medium += d.medium; low += d.low;
+    }
+    out.push({ blockId: blocks[i].id, index: i, count, high, medium, low });
+  }
+  return out;
+}
+
+const LIB = {
+  TYPE_CLS, TYPE_COLOR, TYPE_LABEL, SEV_RANK,
+  esc, fmtBytes, fmtDur, lcsOps, diffHtml, matchAnn, paginate, progressText,
+  blockText, diffBlocks, densityBuckets
+};
+
+/* Node（单元测试）与浏览器（app.js 里写 lib.xxx）两种用法都支持 */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    TYPE_CLS, TYPE_COLOR, TYPE_LABEL, SEV_RANK,
-    esc, fmtBytes, fmtDur, lcsOps, diffHtml, matchAnn, paginate, progressText
-  };
+  module.exports = LIB;
+}
+if (typeof window !== 'undefined') {
+  window.lib = LIB;
 }
