@@ -58,9 +58,9 @@ def _text_hash(block: dict) -> str:
 def _app_version() -> str:
     try:
         import main as _m
-        return getattr(_m, "VERSION", "1.2.0")
+        return getattr(_m, "VERSION", "2.0.0")
     except Exception:
-        return "1.2.0"
+        return "2.0.0"
 
 
 class Api:
@@ -1228,20 +1228,41 @@ class Api:
         return self._payload()
 
     def bulk(self, action: str, scope: str = "all") -> dict:
+        """批量保留/撤销。
+
+        scope 支持三种写法：
+          all            全部
+          错别字         按类型
+          sev:high       按严重度（sev:high / sev:medium / sev:low）
+          pending        只处理还没决定过的
+        """
         if action not in ("accept", "reject", "reset"):
             return {"ok": False, "error": f"无效的批量操作：{action}"}
         targets = self.anns
+        label = "全部"
+        scope = (scope or "all").strip()
         if scope and scope != "all":
-            if scope not in review.TYPES:
-                return {"ok": False, "error": f"未知的分类：{scope}"}
-            targets = [a for a in self.anns if a["type"] == scope]
+            if scope.startswith("sev:"):
+                lv = scope[4:].lower()
+                if lv not in ("high", "medium", "low"):
+                    return {"ok": False, "error": f"未知的严重度：{lv}"}
+                targets = [a for a in self.anns if (a.get("severity") or "medium") == lv]
+                label = {"high": "高优先级", "medium": "中优先级", "low": "低优先级"}[lv]
+            elif scope == "pending":
+                targets = [a for a in self.anns if a.get("status") == "pending"]
+                label = "待处理"
+            elif scope in review.TYPES:
+                targets = [a for a in self.anns if a["type"] == scope]
+                label = scope
+            else:
+                return {"ok": False, "error": f"未知的批量范围：{scope}"}
         if not targets:
-            return {"ok": False, "error": "没有符合条件的批注"}
+            return {"ok": False, "error": f"「{label}」下没有批注"}
         for a in targets:
             a["status"] = {"accept": "accepted", "reject": "rejected"}.get(action, "pending")
         self.blocks_current = review.apply_accepted(self.doc["blocks"], self.anns)
         self._rebuild_relayout()
-        return self._payload(extra={"affected": len(targets)})
+        return self._payload(extra={"affected": len(targets), "scopeLabel": label})
 
     # ------------------------------------------------------------ 重排
     def set_review_opts(self, level: str = "", glossary=None,

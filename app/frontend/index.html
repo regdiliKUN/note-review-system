@@ -184,6 +184,7 @@
             <p>支持 Word（.doc / .docx）、.txt / .md 文档，以及<b>语音、视频、图片笔记</b>——语音与视频会自动转写为文字。<b>原文图片按原格式原位完整保留</b>。<br>
                AI 会逐条给出修改与理由，并对图片逐张说明、标注位置与问题，你可以一条条决定保留还是丢弃。</p>
             <button class="btn btn-primary btn-lg" id="btnImport2">选择文件</button>
+            <div class="guide" id="guideBox" style="display:none"></div>
             <div class="recent" id="recentBox"></div>
           </div>
         </div>
@@ -200,7 +201,11 @@
         </div>
         <div class="rb-actions">
           <select id="bulkScope" class="mini-select" title="批量操作的作用范围">
-            <option value="all">全部类型</option>
+            <option value="all">全部</option>
+            <option value="pending">仅待处理</option>
+            <option value="sev:high">高优先级</option>
+            <option value="sev:medium">中优先级</option>
+            <option value="sev:low">低优先级</option>
             <option value="错别字">错别字</option>
             <option value="事实纠错">事实纠错</option>
             <option value="知识补充">知识补充</option>
@@ -221,6 +226,7 @@
           <button class="chip" data-s="high" title="只看高优先级">高</button>
           <button class="chip" data-s="medium" title="只看中优先级">中</button>
           <button class="chip" data-s="low" title="只看低优先级">低</button>
+          <button class="chip" id="btnGroupBy" title="按段落分组显示">按段落</button>
         </div>
       </div>
       <div class="rb-filter" id="rbFilter">

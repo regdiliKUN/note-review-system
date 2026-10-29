@@ -31,6 +31,7 @@ const S = {
   imgPage: 1,
   find: '',
   findIdx: 0,
+  groupBy: false,
   paperTheme: 0,
   level: 'normal',
   scenario: 'general',
@@ -58,6 +59,7 @@ async function init() {
     fillSettings(boot);
     S.hist = boot.history || {};
     renderRecent(boot.recent || []);
+    if (!(boot.health && boot.health.ok)) showGuide(boot);
     if (boot.pending) {
       const r = await window.pywebview.api.load(boot.pending);
       handlePayload(r);
@@ -65,6 +67,49 @@ async function init() {
   } catch (e) {
     toast('初始化失败：' + e, 'err');
   }
+}
+
+/* 首次运行 / 模型服务没起来时的引导 —— 别让用户对着一堆禁用按钮猜 */
+function showGuide(boot) {
+  const box = $('#guideBox');
+  if (!box) return;
+  const provider = (boot && boot.provider) || 'ollama';
+  const base = (boot && boot.base) || 'http://127.0.0.1:11434';
+  const steps = provider === 'openai'
+    ? [
+      `确认「设置 → 服务地址」填的是可访问的 OpenAI 兼容端点（当前：${esc(base)}）`,
+      '确认 API Key 正确、账户有余额',
+      '点下面的「重新检测」'
+    ]
+    : [
+      '打开终端，运行 <code>ollama serve</code> 启动本地模型服务',
+      '第一次用需要拉模型：<code>ollama pull qwen3:8b</code>（图像理解再加 <code>ollama pull qwen2.5vl:7b</code>）',
+      `确认服务地址是 <code>${esc(base)}</code>（可在设置里改）`,
+      '点下面的「重新检测」'
+    ];
+  box.style.display = '';
+  box.innerHTML = `<div class="guide-head">
+      <b>还差一步：模型服务未连接</b>
+      <span class="guide-sub">笔记本身已经可以导入，审查需要模型服务先跑起来。</span>
+    </div>
+    <ol class="guide-list">${steps.map(s => `<li>${s}</li>`).join('')}</ol>
+    <div class="guide-acts">
+      <button class="btn btn-ghost btn-sm" id="btnGuideRetry">重新检测</button>
+      <button class="btn btn-ghost btn-sm" id="btnGuideDiag">环境自检</button>
+    </div>`;
+  $('#btnGuideRetry').onclick = async () => {
+    const r = await window.pywebview.api.refresh_models();
+    if (r && r.health && r.health.ok) {
+      S.models = r.models || [];
+      fillModels($('#inpModel') ? $('#inpModel').value : '', S.models);
+      setHealth(r.health);
+      box.style.display = 'none';
+      toast(`已连接，可用模型 ${S.models.length} 个`, 'ok');
+    } else {
+      toast((r && r.health && r.health.msg) || '仍然连不上，请检查服务是否启动', 'err');
+    }
+  };
+  $('#btnGuideDiag').onclick = () => $('#settingsMask').classList.add('on');
 }
 
 function fillModels(cur, models) {
@@ -406,12 +451,19 @@ function wire() {
     renderAnns();
   });
 
-  $$('#rbSev .chip').forEach(c => c.onclick = () => {
+  $$('#rbSev .chip[data-s]').forEach(c => c.onclick = () => {
     S.sev = c.dataset.s;
     S.page = 1;
-    $$('#rbSev .chip').forEach(x => x.classList.toggle('active', x === c));
+    $$('#rbSev .chip[data-s]').forEach(x => x.classList.toggle('active', x === c));
     renderAnns();
   });
+
+  $('#btnGroupBy').onclick = () => {
+    S.groupBy = !S.groupBy;
+    $('#btnGroupBy').classList.toggle('active', S.groupBy);
+    S.page = 1;
+    renderAnns();
+  };
 
   let qTimer = null;
   $('#annSearch').oninput = e => {
@@ -945,7 +997,7 @@ function handlePayload(r) {
     S.imgPage = 1;
     if ($('#annSearch')) $('#annSearch').value = '';
     $$('#rbFilter .chip').forEach(x => x.classList.toggle('active', x.dataset.f === 'all'));
-    $$('#rbSev .chip').forEach(x => x.classList.toggle('active', x.dataset.s === 'all'));
+    $$('#rbSev .chip[data-s]').forEach(x => x.classList.toggle('active', x.dataset.s === 'all'));
   }
   renderAll();
   updateHistBar(r);
@@ -1375,10 +1427,34 @@ function renderAnns() {
   const pg = paginate(list, S.page, PAGE_SIZE);
   S.page = pg.page;
   const idxOf = id => all.findIndex(x => x.id === id) + 1;
-  box.innerHTML = pg.items.map(a => annCardHtml(a, idxOf)).join('')
-    + (pg.hasMore
+  if (S.groupBy) {
+    // 按段落分组：同一段的几条意见挨在一起，改起来更连贯
+    const groups = [];
+    const seen = new Map();
+    for (const a of pg.items) {
+      let g = seen.get(a.block_id);
+      if (!g) { g = { bid: a.block_id, items: [] }; seen.set(a.block_id, g); groups.push(g); }
+      g.items.push(a);
+    }
+    box.innerHTML = groups.map(g => {
+      const t = blockPlain(g.bid) || '（空段落）';
+      return `<div class="ann-group">
+        <div class="ag-head" data-bid="${esc(g.bid)}" title="点击跳到原文">
+          <span class="ag-txt">${esc(t.slice(0, 42))}</span>
+          <span class="ag-n">${g.items.length}</span>
+        </div>
+        ${g.items.map(a => annCardHtml(a, idxOf)).join('')}
+      </div>`;
+    }).join('') + (pg.hasMore
       ? `<button class="load-more" id="btnLoadMore">加载更多（已显示 ${pg.shown}/${pg.total}）</button>`
       : '');
+    $$('.ag-head').forEach(h => h.onclick = () => jumpToBlock(h.dataset.bid));
+  } else {
+    box.innerHTML = pg.items.map(a => annCardHtml(a, idxOf)).join('')
+      + (pg.hasMore
+        ? `<button class="load-more" id="btnLoadMore">加载更多（已显示 ${pg.shown}/${pg.total}）</button>`
+        : '');
+  }
   updateAnnFoot(pg.shown, all.length);
   const more = $('#btnLoadMore');
   if (more) more.onclick = () => { S.page += 1; renderAnns(); };
@@ -1611,7 +1687,8 @@ async function bulk(action) {
   renderAll();
   scheduleSave();
   const n = r.affected || 0;
-  toast(`${scope === 'all' ? '全部' : scope} · ${action === 'accept' ? '已保留' : '已撤销'} ${n} 条`,
+  const lbl = r.scopeLabel || (scope === 'all' ? '全部' : scope);
+  toast(`${lbl} · ${action === 'accept' ? '已保留' : '已撤销'} ${n} 条`,
     action === 'accept' ? 'ok' : '');
 }
 

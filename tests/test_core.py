@@ -2308,5 +2308,59 @@ class TestScenarioAndProgress(unittest.TestCase):
         self.assertEqual(ents[0]["anns"], 1)
 
 
+# ══════════════════════════════════════════════════════ 批量范围
+class TestBulkScope(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_bulk_")
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        src = os.path.join(self.tmp, "n.txt")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("标题\n\n第一句。\n")
+        self.api.load(src)
+        self.api.anns = [
+            {"id": "a1", "block_id": "b1", "op": "comment", "type": "错别字",
+             "target": "", "replacement": "", "reason": "r", "severity": "high",
+             "status": "pending", "anchor": None, "sid": None},
+            {"id": "a2", "block_id": "b1", "op": "comment", "type": "表达优化",
+             "target": "", "replacement": "", "reason": "r", "severity": "low",
+             "status": "pending", "anchor": None, "sid": None},
+            {"id": "a3", "block_id": "b1", "op": "comment", "type": "表达优化",
+             "target": "", "replacement": "", "reason": "r", "severity": "medium",
+             "status": "accepted", "anchor": None, "sid": None},
+        ]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_scope_by_severity(self):
+        r = self.api.bulk("accept", "sev:high")
+        self.assertEqual(r["affected"], 1)
+        self.assertEqual(r["scopeLabel"], "高优先级")
+        self.assertEqual(r["stats"]["accepted"], 2)
+
+    def test_scope_pending_only(self):
+        r = self.api.bulk("reject", "pending")
+        self.assertEqual(r["affected"], 2)
+        self.assertEqual(r["stats"]["pending"], 0)
+
+    def test_scope_by_type(self):
+        r = self.api.bulk("accept", "表达优化")
+        self.assertEqual(r["affected"], 2)
+
+    def test_bad_severity(self):
+        self.assertFalse(self.api.bulk("accept", "sev:urgent")["ok"])
+
+    def test_empty_scope_targets(self):
+        self.api.bulk("accept", "sev:high")
+        r = self.api.bulk("accept", "sev:high")   # 已无 pending 但仍有目标
+        self.assertTrue(r["ok"])
+        r2 = self.api.bulk("accept", "存疑待核")
+        self.assertFalse(r2["ok"])
+        self.assertIn("没有批注", r2["error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
