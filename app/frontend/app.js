@@ -1101,6 +1101,7 @@ function handlePayload(r) {
       ? `已停止审查，保留 ${r.anns.length} 条批注`
       : `审查完成，共 ${r.anns.length} 条批注${extra}，用时 ${r.elapsed}s`,
       r.canceled ? '' : 'ok');
+    if (r.qualityNote) toast(r.qualityNote, '');
   }
   (r.warnings || []).forEach(w => toast(w, 'err'));
 }

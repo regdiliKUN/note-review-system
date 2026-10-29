@@ -289,6 +289,10 @@ def is_placeholder(t: str) -> bool:
     return bool(_PLACEHOLDER.match((t or "").strip()))
 
 
+MAX_REPL_RATIO = 3.0          # 替换文本最多是原句的几倍
+MIN_REPL_ABS = 80             # 但短句允许放宽到这个绝对长度
+
+
 def keep_annotation(a: Dict[str, Any]) -> bool:
     """过滤掉「改了等于没改」和「说不清为什么改」的批注。
 
@@ -296,6 +300,7 @@ def keep_annotation(a: Dict[str, Any]) -> bool:
       · replacement 是「……」或「（略）」这种占位符
       · 整句替换却完全没写 reason，作者无法判断要不要采纳
       · 只提醒不修改，但 reason 只有两个字
+      · 号称「整句替换」，实际把一整段都重写了一遍
     """
     if a.get("op") == "comment":
         return len((a.get("reason") or "").strip()) >= 4
@@ -304,7 +309,57 @@ def keep_annotation(a: Dict[str, Any]) -> bool:
         return False
     if a.get("op") in ("replace", "replace_sentence") and not (a.get("reason") or "").strip():
         return False
+    # 长度异常：整句替换却输出了一大段，基本是模型自行扩写，采纳后会把原文冲掉
+    if a.get("op") in ("replace", "replace_sentence"):
+        target = (a.get("target") or "").strip()
+        if target and len(repl) > max(MIN_REPL_ABS, len(target) * MAX_REPL_RATIO):
+            return False
     return True
+
+
+def demote_weak_reason(anns: List[Dict[str, Any]], min_len: int = 6
+                       ) -> List[Dict[str, Any]]:
+    """理由太短的批注降到低优先级。
+
+    「这里有问题」「建议修改」这类理由等于没给依据；直接删掉太粗暴，
+    但也不该和「原文把 2014 写成 2015」排在一起。
+    """
+    for a in anns:
+        if len((a.get("reason") or "").strip()) < min_len and a.get("severity") != "low":
+            a["severity"] = "low"
+    return anns
+
+
+def drop_types(anns: List[Dict[str, Any]], types) -> List[Dict[str, Any]]:
+    """按类型过滤（轻力度下用来挡掉「表达优化」这类主观批注）。"""
+    if not types:
+        return anns
+    skip = set(types)
+    return [a for a in anns if a.get("type") not in skip]
+
+
+def carry_status(old: List[Dict[str, Any]], new: List[Dict[str, Any]]
+                 ) -> int:
+    """重新审查后，把用户上次的「保留 / 丢弃」带到新结果上。
+
+    旧版每次重审都把状态重置成 pending，用户辛苦挑完的几十条判断
+    在「再跑一遍看看」之后全部清零 —— 这是最让人恼火的一类体验问题。
+    只对「同一段落、同一句、同一类型、同一替换文本」的批注沿用状态，
+    模型给出不同建议时不沿用（那是新结论，需要重新判断）。
+    """
+    key = lambda a: (a.get("block_id"), a.get("sid"), a.get("type"),
+                     (a.get("replacement") or "").strip())
+    prev = {key(a): a.get("status") for a in old if a.get("status") in ("accepted", "rejected")}
+    if not prev:
+        return 0
+    n = 0
+    for a in new:
+        st = prev.get(key(a))
+        if st:
+            a["status"] = st
+            a["carried"] = True
+            n += 1
+    return n
 
 
 def dedupe_conflicts(anns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

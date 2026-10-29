@@ -11,6 +11,8 @@ from typing import Any, Callable, Dict, List
 from .docmodel import block_plain, block_text_only
 from .llm import LLM, LLMError, VisionUnsupported, extract_json
 from .review import (block_sentences, build_annotation, dedupe_conflicts,
+                     demote_weak_reason as review_demote,
+                     drop_types as review_drop_types,
                      finalize as review_finalize,
                      keep_annotation as review_keep)
 
@@ -50,7 +52,14 @@ op 的含义：
  {"block_id":"b9","sid":null,"op":"comment","type":"结构建议",
   "replacement":"","reason":"本节缺小标题，建议拆分。","severity":"low"}
 ]}
-severity 取 high / medium / low。"""
+severity 取 high / medium / low。
+
+改与不改的对照（照这个尺度把握，不要更激进）：
+- 该改：「他昨天去了北京，去了三天。」→ 前后矛盾，属事实/表达问题，改。
+- 该改：「这个功能很重要，因为它很重要。」→ 循环论证，删掉重复部分。
+- 不该改：「我把参数调大了，效果好很多。」→ 口语但意思清楚，不属硬错误，标准力度下不提。
+- 不该改：「Adam 优化器」→ 不要因为不熟悉就改成人名或别的拼写；拿不准就放进「存疑待核」。
+"""
 
 SYSTEM_SUMMARY = """你是中文笔记的结构编辑。请阅读整篇笔记，输出一份 JSON 归纳结果。\
 只输出 JSON，不要解释。"""
@@ -63,11 +72,16 @@ SYSTEM_MAP = """你是中文笔记的要点提取器。用户会给你一篇长�
 # 审校力度：直接决定模型「敢不敢改」
 REVIEW_LEVELS = {
     "light": "只挑硬错误：错别字、事实/数据错误、明显病句。措辞风格上的差异一律不提，"
-             "没有硬错误就返回空数组。",
+             "没有硬错误就返回空数组。不要输出「表达优化」「逻辑归纳」两类批注。",
     "normal": "按标准力度审校：硬错误 + 确实值得改的表达与结构问题。",
     "strict": "严格审校：除硬错误外，还要指出可以更精确、更简洁的表达，"
-              "并主动补充关键缺失的定义与前提。允许给出较多批注。",
+              "并主动补充关键缺失的定义与前提。允许给出较多批注。"
+              "结构问题也必须给出可执行的改法（用 replace_sentence 或 insert_after 给出具体文字），"
+              "不要只写一条 comment 让作者自己想办法。",
 }
+
+# 轻力度下不该出现的批注类型（模型经常不听话，落地时再兜一层）
+LIGHT_SKIP_TYPES = ("表达优化", "逻辑归纳")
 
 # 审查场景：不同类型的笔记，值得关心的东西完全不同。
 # 与其让用户自己写一大段提示词，不如给几个开箱可用的关注点。
@@ -286,10 +300,31 @@ def _chunk_tails(chunks: List[List[Dict]]) -> List[str]:
     return tails
 
 
-def _chunk_prompt(doc_ctx: str, i: int, total: int, chunk: List[Dict], tail: str) -> str:
+def _section_paths(blocks: List[Dict[str, Any]]) -> Dict[str, str]:
+    """给每个 block 算出它所在的标题路径，例如「第二章 › 2.1 环境搭建」。
+
+    长文档里，同一句话在不同章节里的「正确写法」可能完全不同；
+    把章节路径带进提示词，模型才不会用第一章的语境去改第三章的句子。
+    """
+    out: Dict[str, str] = {}
+    stack: List[tuple] = []
+    for b in blocks:
+        if b["kind"] == "heading":
+            lv = max(1, int(b.get("level") or 1))
+            text = block_text_only(b).strip().replace("\n", " ")[:40]
+            while stack and stack[-1][0] >= lv:
+                stack.pop()
+            stack.append((lv, text))
+        out[b["id"]] = " › ".join(t for _lv, t in stack)
+    return out
+
+
+def _chunk_prompt(doc_ctx: str, i: int, total: int, chunk: List[Dict], tail: str,
+                  section: str = "") -> str:
     return (
         f"{doc_ctx}\n\n"
-        f"以下是笔记的第 {i + 1}/{total} 部分（[b3｜正文] 是段落编号，"
+        + (f"当前章节：{section}\n" if section else "")
+        + f"以下是笔记的第 {i + 1}/{total} 部分（[b3｜正文] 是段落编号，"
         f"行首数字是句号编号 sid）：\n"
         + (f"\n【紧接上文】{tail}\n" if tail else "\n")
         + f"\n{_render_chunk(chunk)}\n\n"
@@ -353,11 +388,14 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     system = _system_review(level, glossary, scenario)
     doc_ctx = _doc_context(doc)
     tails = _chunk_tails(chunks)
+    paths = _section_paths(doc["blocks"])
     workers = max(1, min(int(concurrency or 1), total))
 
     def work(i: int) -> Dict[str, Any]:
+        first = chunks[i][0]["b"]["id"] if chunks[i] else ""
         return _ask_json(llm, system,
-                         _chunk_prompt(doc_ctx, i, total, chunks[i], tails[i]),
+                         _chunk_prompt(doc_ctx, i, total, chunks[i], tails[i],
+                                       paths.get(first, "")),
                          max_tokens=_output_budget(chunks[i]))
 
     # ---- 送审：串行或并发，结果一律按分块顺序回收
@@ -449,6 +487,9 @@ def review_document(doc: Dict[str, Any], llm: LLM,
 
     # 同一句的冲突改写只留一条，再按严重度排序
     before = len(anns)
+    if (level or "normal").lower() == "light":
+        anns = review_drop_types(anns, LIGHT_SKIP_TYPES)
+    anns = review_demote(anns)
     anns = review_finalize(anns, max_per_block=max_per_block)
     conflicts = before - len(anns)
     if report is not None:

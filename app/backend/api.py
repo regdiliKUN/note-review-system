@@ -1087,6 +1087,28 @@ class Api:
         self._log("用户请求取消审查")
         return {"ok": True, "message": "已请求停止，正在收尾（已完成的分块会保留）"}
 
+    @staticmethod
+    def _quality_note(rep: dict, carried: int = 0) -> str:
+        """把审查报告里的一堆数字变成一句人话。"""
+        if not rep:
+            return ""
+        bits = []
+        if rep.get("annotations"):
+            bits.append(f"{rep['annotations']} 条有效建议")
+        if rep.get("dropped"):
+            bits.append(f"过滤 {rep['dropped']} 条噪声")
+        if rep.get("conflicts"):
+            bits.append(f"合并 {rep['conflicts']} 处冲突")
+        if rep.get("failed"):
+            bits.append(f"{len(rep['failed'])} 段失败")
+        if rep.get("empty"):
+            bits.append(f"{rep['empty']} 段无意见")
+        if carried:
+            bits.append(f"沿用 {carried} 条取舍")
+        if int(rep.get("concurrency") or 1) > 1:
+            bits.append(f"并发 {rep['concurrency']}")
+        return "　·　".join(bits)
+
     def run_review(self, do_summary: bool = True, incremental: bool = False) -> dict:
         if not self.doc:
             return {"ok": False, "error": "请先导入笔记"}
@@ -1170,8 +1192,12 @@ class Api:
             })
             if incremental and reused:
                 self.anns = review.finalize(reused + new_anns)
+                carried = 0
             else:
-                self.anns = new_anns
+                # 重审时把用户上次的「保留 / 丢弃」带过来：只对同段同句同类型的
+                # 批注沿用，模型给出不同建议时仍按新结论处理。
+                carried = review.carry_status(self.anns, new_anns) if self.anns else 0
+                self.anns = review.finalize(new_anns)
             canceled = bool(rep.get("canceled"))
             if canceled:
                 # 取消时跳过图像理解与摘要（这两个最耗时），直接落盘已完成的部分
@@ -1202,6 +1228,8 @@ class Api:
             entry = self._save_history(elapsed)      # 自动持久化本次审查
             self.busy = False
             warnings = []
+            if carried:
+                warnings.append(f"已沿用你上次对 {carried} 条批注的取舍（保留/丢弃）。")
             if incremental and reused:
                 warnings.append(f"增量审查：{len(reused)} 条批注沿用上次结果，"
                                 f"本次只把有改动的段落送去模型。")
@@ -1227,8 +1255,10 @@ class Api:
                 "canceled": canceled,
                 "incremental": bool(incremental and reused),
                 "reusedCount": len(reused) if incremental else 0,
+                "carriedCount": carried,
                 "historySaved": entry,
                 "reviewReport": rep,
+                "qualityNote": self._quality_note(rep, carried),
                 "warnings": warnings,
             })
         except LLMError as e:

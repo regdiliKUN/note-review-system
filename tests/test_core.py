@@ -642,14 +642,24 @@ class TestReviewDocument(unittest.TestCase):
         doc = {"title": "t", "blocks": blocks}
         reply = json.dumps({"annotations": [
             {"block_id": "b0", "sid": 0, "op": "replace_sentence", "type": "表达优化",
-             "replacement": "新第一句。", "reason": "r1", "severity": "low"},
+             "replacement": "新第一句。", "reason": "原文略显啰嗦", "severity": "low"},
             {"block_id": "b0", "sid": 1, "op": "replace_sentence", "type": "事实纠错",
-             "replacement": "新第二句。", "reason": "r2", "severity": "high"},
+             "replacement": "新第二句。", "reason": "原句年份写错了", "severity": "high"},
         ]}, ensure_ascii=False)
         anns = pipeline.review_document(doc, MockLLM([reply]))
         self.assertEqual(len(anns), 2)
         self.assertEqual(anns[0]["severity"], "high", "严重问题应排在前面")
         self.assertEqual([a["id"] for a in anns], ["a1", "a2"])
+
+    def test_short_reason_demoted_to_low(self):
+        """理由只有一两个字等于没给依据，不该排在「原文年份写错了」旁边。"""
+        blocks = index([para(txt("第一句。"))])
+        reply = json.dumps({"annotations": [
+            {"block_id": "b0", "sid": 0, "op": "replace_sentence", "type": "事实纠错",
+             "replacement": "新句。", "reason": "错了", "severity": "high"}]},
+            ensure_ascii=False)
+        anns = pipeline.review_document({"title": "t", "blocks": blocks}, MockLLM([reply]))
+        self.assertEqual(anns[0]["severity"], "low")
 
     def test_duplicate_annotations_removed(self):
         blocks = index([para(txt("甲。"))])
@@ -2825,6 +2835,106 @@ class TestBatchReview(unittest.TestCase):
         path = r["results"][0]["exported"]
         self.assertTrue(path.endswith(".txt"))
         self.assertIn("改写后的正文", open(path, encoding="utf-8").read())
+
+
+class TestReviewQuality(unittest.TestCase):
+    """提示词上下文、力度过滤、替换长度保护、取舍沿用。"""
+
+    def test_section_path_injected(self):
+        blocks = index([
+            heading("第一章", 1),
+            heading("1.1 环境", 2),
+            para(txt("正文第一句。")),
+        ])
+        paths = pipeline._section_paths(blocks)
+        self.assertEqual(paths["b2"], "第一章 › 1.1 环境")
+
+    def test_section_path_empty_before_heading(self):
+        blocks = index([para(txt("开头一段。"))])
+        self.assertEqual(pipeline._section_paths(blocks)["b0"], "")
+
+    def test_section_path_resets_on_same_level(self):
+        blocks = index([heading("A", 1), heading("B", 1), para(txt("x。"))])
+        self.assertEqual(pipeline._section_paths(blocks)["b2"], "B")
+
+    def test_prompt_contains_section(self):
+        blocks = index([heading("第二章", 1), para(txt("内容一句。"))])
+        m = MockLLM([json.dumps({"annotations": []})])
+        pipeline.review_document({"title": "t", "blocks": blocks}, m)
+        self.assertIn("当前章节：第二章", m.calls[0]["user"])
+
+    def test_light_level_drops_expression_annotations(self):
+        blocks = index([para(txt("第一句。第二句。"))])
+        reply = json.dumps({"annotations": [
+            {"block_id": "b0", "sid": 0, "op": "replace_sentence", "type": "表达优化",
+             "replacement": "更顺的第一句。", "reason": "措辞可以更简洁一些"},
+            {"block_id": "b0", "sid": 1, "op": "replace_sentence", "type": "事实纠错",
+             "replacement": "正确年份。", "reason": "原文年份写错了"},
+        ]}, ensure_ascii=False)
+        anns = pipeline.review_document({"title": "t", "blocks": blocks},
+                                        MockLLM([reply]), level="light")
+        self.assertEqual([a["type"] for a in anns], ["事实纠错"])
+
+    def test_oversized_replacement_dropped(self):
+        blocks = index([para(txt("短短一句。"))])
+        huge = "这是一段被模型自行扩写出来的超长文本。" * 10
+        reply = json.dumps({"annotations": [
+            {"block_id": "b0", "sid": 0, "op": "replace_sentence",
+             "type": "表达优化", "replacement": huge, "reason": "改写一下"}]},
+            ensure_ascii=False)
+        anns = pipeline.review_document({"title": "t", "blocks": blocks}, MockLLM([reply]))
+        self.assertEqual(anns, [], "整段重写式的替换应被挡掉")
+
+    def test_moderate_expansion_kept(self):
+        blocks = index([para(txt("这一句比较短。"))])
+        repl = "这一句比较短，但补充了必要的限定条件，读起来更准确。"
+        reply = json.dumps({"annotations": [
+            {"block_id": "b0", "sid": 0, "op": "replace_sentence",
+             "type": "表达优化", "replacement": repl, "reason": "补充限定条件"}]},
+            ensure_ascii=False)
+        anns = pipeline.review_document({"title": "t", "blocks": blocks}, MockLLM([reply]))
+        self.assertEqual(len(anns), 1)
+
+    def test_carry_status_matches_exact_annotation(self):
+        old = [{"block_id": "b0", "sid": 0, "type": "事实纠错",
+                "replacement": "新句。", "status": "accepted"}]
+        new = [{"block_id": "b0", "sid": 0, "type": "事实纠错",
+                "replacement": "新句。", "status": "pending"},
+               {"block_id": "b0", "sid": 1, "type": "表达优化",
+                "replacement": "别的。", "status": "pending"}]
+        n = review.carry_status(old, new)
+        self.assertEqual(n, 1)
+        self.assertEqual(new[0]["status"], "accepted")
+        self.assertTrue(new[0].get("carried"))
+        self.assertEqual(new[1]["status"], "pending")
+
+    def test_carry_status_ignores_changed_suggestion(self):
+        old = [{"block_id": "b0", "sid": 0, "type": "事实纠错",
+                "replacement": "旧建议。", "status": "rejected"}]
+        new = [{"block_id": "b0", "sid": 0, "type": "事实纠错",
+                "replacement": "新建议。", "status": "pending"}]
+        self.assertEqual(review.carry_status(old, new), 0)
+        self.assertEqual(new[0]["status"], "pending")
+
+    def test_carry_status_ignores_pending(self):
+        old = [{"block_id": "b0", "sid": 0, "type": "事实纠错",
+                "replacement": "x", "status": "pending"}]
+        new = [{"block_id": "b0", "sid": 0, "type": "事实纠错",
+                "replacement": "x", "status": "pending"}]
+        self.assertEqual(review.carry_status(old, new), 0)
+
+    def test_quality_note_readable(self):
+        from backend.api import Api
+        note = Api._quality_note({"annotations": 12, "dropped": 3, "conflicts": 1,
+                                  "empty": 2, "concurrency": 3}, carried=4)
+        self.assertIn("12 条有效建议", note)
+        self.assertIn("过滤 3 条噪声", note)
+        self.assertIn("沿用 4 条取舍", note)
+        self.assertIn("并发 3", note)
+
+    def test_quality_note_empty(self):
+        from backend.api import Api
+        self.assertEqual(Api._quality_note({}), "")
 
 
 if __name__ == "__main__":
