@@ -1122,6 +1122,16 @@ class TestGuessTitle(unittest.TestCase):
         blocks = index([para(txt("目录")), heading("真正的标题"), para(txt("正文。"))])
         self.assertEqual(docmodel._guess_title(blocks), "真正的标题")
 
+    def test_first_line_beats_promoted_section(self):
+        """首行是标题、但 infer_headings 把「一、基础操作」提成了一级标题时，
+        标题仍应是首行，而不是第一个编号小节。"""
+        blocks = index([
+            para(txt("ZBrush 建模笔记")),
+            heading("一、基础操作"),
+            para(txt("正文内容。")),
+        ])
+        self.assertEqual(docmodel._guess_title(blocks), "ZBrush 建模笔记")
+
     def test_skips_page_noise(self):
         blocks = index([para(txt("Page 1")), para(txt("2024-05-01")), para(txt("目录")),
                         para(txt("ZBrush 建模笔记"))])
@@ -1130,6 +1140,11 @@ class TestGuessTitle(unittest.TestCase):
     def test_fallback_to_first_text(self):
         blocks = index([para(txt("很长" * 30)), para(txt("短标题"))])
         self.assertEqual(docmodel._guess_title(blocks), "短标题")
+
+    def test_sentence_first_line_skipped(self):
+        blocks = index([para(txt("这是一句完整的正文，不该当标题。")),
+                        heading("真正的标题")])
+        self.assertEqual(docmodel._guess_title(blocks), "真正的标题")
 
     def test_empty(self):
         self.assertEqual(docmodel._guess_title([]), "未命名笔记")

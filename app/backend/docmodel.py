@@ -1103,25 +1103,41 @@ def infer_headings(blocks: List[Dict[str, Any]]):
 def _guess_title(blocks: List[Dict[str, Any]]) -> str:
     """猜标题。
 
-    旧版只取「前 6 块里第一个不超过 40 字的文本」，于是大量笔记的标题变成
-    「目录」「Page 1」「2024-05-01」这类噪声。现在按可信度分级：
-    一级标题 > 开头的短文本（且不是页码/日期/目录等占位）。
+    优先看**文档开头那几行**：中文笔记的标题几乎总是第一行。
+    旧版优先找「一级标题」，结果 infer_headings 把「一、基础操作」提成了
+    一级标题后，整篇的标题就变成了「一、基础操作」。
     """
-    for b in blocks:
-        if b["kind"] == "heading" and b.get("level") == 1:
-            t = block_text_only(b).strip()
-            if t and len(t) <= 60:
-                return t.split("\n")[0]
     noise = re.compile(r"^(目录|目\s*录|contents?|page\s*\d+|第?\s*\d+\s*页|"
                        r"\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?|\d+)$", re.I)
-    for b in blocks[:8]:
+
+    def clean(b):
         t = block_text_only(b).strip()
-        if not t:
+        return t.split("\n")[0].strip() if t else ""
+
+    # 1) 开头就是标题或短行 → 直接用（这是最常见的情况）
+    for b in blocks[:3]:
+        first = clean(b)
+        if not first or noise.match(first):
             continue
-        first = t.split("\n")[0].strip()
-        if not first or len(first) > 40 or noise.match(first):
-            continue
-        return first
+        if b["kind"] == "heading":
+            return first[:60]
+        if len(first) <= 40 and not first.endswith(("。", "，", "；", "、", "：")):
+            return first
+        break
+
+    # 2) 退回第一个一级标题
+    for b in blocks:
+        if b["kind"] == "heading" and b.get("level") == 1:
+            t = clean(b)
+            if t and len(t) <= 60:
+                return t
+
+    # 3) 前 8 块里第一个像样的短文本
+    for b in blocks[:8]:
+        first = clean(b)
+        if first and len(first) <= 40 and not noise.match(first):
+            return first
+
     for b in blocks[:8]:
         t = block_text_only(b).strip()
         if t:
