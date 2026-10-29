@@ -14,3 +14,7 @@
 *.png  binary
 *.ico  binary
 *.exe  binary
+
+# release/ 下是已发布的可运行包体，必须按原始字节入库：
+# 一旦做换行符规范化，包内 .py/.html 的字节就变了，SHA256SUMS.txt 立刻失效。
+release/** -text
