@@ -193,10 +193,56 @@ function densityBuckets(blocks, anns, buckets = 80) {
   return out;
 }
 
+/* 文档健康度评分（0–100）。
+   评分不是「文笔打分」，而是「这份笔记还有多少待处理的问题」：
+   批注密度越高、高优先级越多、没审到的段落越多，分数越低。
+   用户需要一个能一眼看懂的数字来判断「这稿能不能发出去了」。 */
+function healthScore(blocks, anns, opts) {
+  const o = opts || {};
+  const list = anns || [];
+  let chars = 0;
+  (blocks || []).forEach(b => {
+    if (b.kind === 'table') return;
+    chars += blockText(b.tokens || []).length;
+  });
+  const total = list.length;
+  const high = list.filter(a => a.severity === 'high').length;
+  const pending = list.filter(a => (a.status || 'pending') === 'pending').length;
+  const failed = o.failed || 0;
+  const totalBlocks = (blocks || []).length || 1;
+
+  const density = chars > 0 ? (total / chars) * 1000 : 0;
+  const penDensity = Math.min(45, density * 4);
+  const penHigh = Math.min(30, high * 2.5);
+  const penFailed = Math.min(20, (failed / totalBlocks) * 100);
+  let score = Math.round(100 - penDensity - penHigh - penFailed);
+  score = Math.max(0, Math.min(100, score));
+
+  const level = score >= 85 ? 'good' : score >= 70 ? 'ok' : score >= 50 ? 'warn' : 'bad';
+  const label = { good: '良好', ok: '尚可', warn: '需改进', bad: '待大幅整理' }[level];
+  const detail = {
+    chars, total, high, pending, failed,
+    density: Math.round(density * 10) / 10
+  };
+  let advice = '';
+  if (failed > 0) {
+    advice = `还有 ${failed} 个段落没有审查到，建议先补审再看评分。`;
+  } else if (total >= 8 && pending / total > 0.8 && o.rejected === 0) {
+    advice = '绝大多数批注还没处理，评分会随处理进度上升。';
+  } else if (o.rejected && total && o.rejected / total > 0.7) {
+    advice = '你丢弃了大部分建议 —— 当前审校力度可能偏严，可在设置里调成「轻」。';
+  } else if (score >= 85) {
+    advice = '问题已经不多，可以定稿了。';
+  } else if (high > 0) {
+    advice = `还有 ${high} 条高优先级问题，建议优先处理。`;
+  }
+  return { score, level, label, detail, advice };
+}
+
 const LIB = {
   TYPE_CLS, TYPE_COLOR, TYPE_LABEL, SEV_RANK,
   esc, fmtBytes, fmtDur, lcsOps, diffHtml, matchAnn, paginate, progressText,
-  blockText, diffBlocks, densityBuckets
+  blockText, diffBlocks, densityBuckets, healthScore
 };
 
 /* Node（单元测试）与浏览器（app.js 里写 lib.xxx）两种用法都支持 */

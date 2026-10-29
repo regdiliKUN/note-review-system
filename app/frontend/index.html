@@ -402,6 +402,14 @@
         </div>
       </div>
       <div class="field">
+        <label>配置备份</label>
+        <div class="diag-actions">
+          <button class="btn btn-ghost btn-sm" id="btnExportCfg">导出配置</button>
+          <button class="btn btn-ghost btn-sm" id="btnImportCfg">导入配置</button>
+        </div>
+        <div class="hint">换电脑或重装时用它搬设置。导出的 JSON 不含 API Key，导入时也不会用空值覆盖你已填的密钥。</div>
+      </div>
+      <div class="field">
         <label>重排选项</label>
         <div class="checks">
           <label class="ck"><input type="checkbox" data-opt="add_toc"> 生成目录</label>
@@ -539,11 +547,14 @@
     </div>
     <div class="modal-body">
       <div class="keys-grid">
-        <span>切换视图</span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd><kbd>5</kbd><kbd>6</kbd>
+        <span>全部批注 / 原版 / 修正版</span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>
+        <span>重新排版 / 图像审查</span><kbd>4</kbd><kbd>5</kbd>
+        <span>内容归纳 / 原文对比</span><kbd>6</kbd><kbd>7</kbd>
+        <span>页内查找</span><kbd>Ctrl</kbd><kbd>F</kbd>
         <span>下一条 / 上一条批注</span><kbd>J</kbd><kbd>K</kbd>
         <span>保留当前批注</span><kbd>A</kbd>
         <span>丢弃当前批注</span><kbd>R</kbd>
-        <span>聚焦搜索框</span><kbd>/</kbd>
+        <span>聚焦批注搜索框</span><kbd>/</kbd>
         <span>撤销上一步批注操作</span><kbd>Ctrl</kbd><kbd>Z</kbd>
         <span>放大 / 缩小正文字号</span><kbd>Ctrl</kbd><kbd>+</kbd><kbd>−</kbd>
         <span>关闭弹层 / 灯箱</span><kbd>Esc</kbd>
@@ -552,7 +563,7 @@
       </div>
       <div class="hint" style="margin-top:12px">
         提示：批注卡片上的「保留 / 丢弃」可以直接点，也可以先用 J/K 选中再用 A/R 决定，
-        一路键盘处理几十条批注比来回点鼠标快得多。
+        一路键盘处理几十条批注比来回点鼠标快得多。右侧竖条是批注密度，点一下直接跳到那一段。
       </div>
     </div>
     <div class="modal-foot">

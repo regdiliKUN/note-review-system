@@ -253,6 +253,80 @@ t('对比视图与密度条的元素存在于 HTML', () => {
   assert.ok(/data-view="compare"/.test(html), '缺少对比视图标签');
 });
 
+/* ── healthScore ── */
+const HB = n => Array.from({ length: n }, (_, i) => ({ id: 'b' + i, kind: 'para', tokens: [{ k: 't', v: '字'.repeat(100) }] }));
+const HA = (n, sev, status) => Array.from({ length: n }, () => ({ block_id: 'b0', severity: sev || 'low', status: status || 'pending' }));
+
+t('healthScore 无批注时接近满分', () => {
+  const h = lib.healthScore(HB(5), []);
+  assert.equal(h.score, 100);
+  assert.equal(h.level, 'good');
+});
+
+t('healthScore 密度越高分越低', () => {
+  const few = lib.healthScore(HB(5) , HA(2));
+  const many = lib.healthScore(HB(5) , HA(40));
+  assert.ok(many.score < few.score, `${many.score} 应低于 ${few.score}`);
+});
+
+t('healthScore 高优先级扣分更多', () => {
+  const low = lib.healthScore(HB(5) , HA(4, 'low'));
+  const high = lib.healthScore(HB(5) , HA(4, 'high'));
+  assert.ok(high.score < low.score);
+});
+
+t('healthScore 有未审段落时扣分并给出建议', () => {
+  const h = lib.healthScore(HB(10) , HA(2), { failed: 3 });
+  assert.ok(h.score < 100);
+  assert.match(h.advice, /补审/);
+});
+
+t('healthScore 丢弃率过高时提示力度偏严', () => {
+  const h = lib.healthScore(HB(5) , HA(10), { rejected: 9 });
+  assert.match(h.advice, /偏严/);
+});
+
+t('healthScore 分数恒在 0..100', () => {
+  const h = lib.healthScore(HB(3) , HA(300, 'high'), { failed: 3 });
+  assert.ok(h.score >= 0 && h.score <= 100);
+  assert.equal(h.level, 'bad');
+});
+
+t('healthScore 空文档不崩', () => {
+  const h = lib.healthScore([], []);
+  assert.equal(h.score, 100);
+  assert.equal(h.detail.chars, 0);
+});
+
+/* ── 快捷键不能重复绑定 ── */
+t('数字键 1-7 各自只绑定一个视图', () => {
+  const keys = [...appJs.matchAll(/e\.key === '(\d)'\)\s*switchView\('(\w+)'\)/g)];
+  const map = {};
+  for (const [, k, v] of keys) {
+    assert.ok(!map[k], `按键 ${k} 被重复绑定（${map[k]} 与 ${v}）`);
+    map[k] = v;
+  }
+  const views = Object.values(map);
+  assert.equal(new Set(views).size, views.length, '同一视图不应占用两个按键');
+  for (const v of ['annotated', 'original', 'revised', 'relayout', 'images', 'summary', 'compare']) {
+    assert.ok(views.includes(v), `视图 ${v} 没有快捷键`);
+  }
+});
+
+t('快捷键面板列出了全部视图键', () => {
+  for (const k of ['1', '2', '3', '4', '5', '6', '7']) {
+    assert.ok(new RegExp(`<kbd>${k}</kbd>`).test(html), `快捷键面板缺少 ${k}`);
+  }
+});
+
+t('健康度卡片样式已定义', () => {
+  const css = libJs && require('node:fs').readFileSync(
+    path.join(ROOT, 'app', 'frontend', 'styles.css'), 'utf8');
+  for (const cls of ['.health-score', '.health-good', '.health-bad']) {
+    assert.ok(css.includes(cls), `缺少样式 ${cls}`);
+  }
+});
+
 /* ── 汇总 ── */
 console.log('='.repeat(62));
 console.log(`前端用例 ${pass + fail}　通过 ${pass}　失败 ${fail}`);

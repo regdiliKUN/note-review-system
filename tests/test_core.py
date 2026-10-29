@@ -2701,5 +2701,51 @@ class TestGlossary(unittest.TestCase):
         self.assertEqual(parse_glossary_text(None), [])
 
 
+class TestConfigBackup(unittest.TestCase):
+    def test_export_strips_secrets_and_recent(self):
+        from backend.api import strip_config_for_export
+        cfg = {"api_key": "sk-1", "asr_key": "k2", "model": "m", "recent": ["a"]}
+        data, stripped = strip_config_for_export(cfg, "9.9.9")
+        self.assertEqual(data["api_key"], "")
+        self.assertEqual(data["asr_key"], "")
+        self.assertNotIn("recent", data)
+        self.assertEqual(sorted(stripped), ["api_key", "asr_key"])
+        self.assertEqual(data["_version"], "9.9.9")
+        self.assertIn("_exported_at", data)
+
+    def test_export_keeps_non_secret(self):
+        from backend.api import strip_config_for_export
+        data, stripped = strip_config_for_export({"model": "qwen3:8b"})
+        self.assertEqual(data["model"], "qwen3:8b")
+        self.assertEqual(stripped, [])
+
+    def test_import_ignores_unknown_keys(self):
+        from backend.api import merge_imported_config
+        cfg = {"model": "a"}
+        incoming, applied = merge_imported_config(
+            cfg, {"model": "b", "乱写": 1, "_version": "1"}, {"model"})
+        self.assertEqual(incoming, {"model": "b"})
+        self.assertEqual(applied, ["model"])
+
+    def test_import_does_not_clear_existing_secret(self):
+        from backend.api import merge_imported_config
+        cfg = {"api_key": "sk-real", "model": "a"}
+        merge_imported_config(cfg, {"api_key": "", "model": "b"},
+                              {"api_key", "model"})
+        self.assertEqual(cfg["api_key"], "sk-real", "脱敏配置不能清掉已填的密钥")
+        self.assertEqual(cfg["model"], "b")
+
+    def test_import_fills_relayout_defaults(self):
+        from backend.api import merge_imported_config
+        cfg = {}
+        merge_imported_config(cfg, {"relayout": {"add_toc": False}}, {"relayout"})
+        self.assertFalse(cfg["relayout"]["add_toc"])
+        self.assertIn("number_headings", cfg["relayout"])
+
+    def test_import_non_dict(self):
+        from backend.api import merge_imported_config
+        self.assertEqual(merge_imported_config({}, [], set()), ({}, []))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

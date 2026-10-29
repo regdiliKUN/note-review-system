@@ -87,6 +87,47 @@ def parse_glossary_text(text: str) -> list:
     return out
 
 
+CONFIG_SECRETS = ("api_key", "asr_key")
+
+
+def strip_config_for_export(cfg: dict, version: str = "") -> tuple:
+    """生成可分享的配置副本：去掉密钥与本机路径。
+
+    返回 (data, 被清空的字段名列表)，便于界面提示「密钥已移除」。
+    """
+    data = dict(cfg or {})
+    stripped = []
+    for k in CONFIG_SECRETS:
+        if data.get(k):
+            data[k] = ""
+            stripped.append(k)
+    data.pop("recent", None)          # 本机路径，换机后没意义
+    data["_exported_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    if version:
+        data["_version"] = version
+    return data, stripped
+
+
+def merge_imported_config(cfg: dict, data, known: set) -> tuple:
+    """把导入的配置合进现有配置。
+
+    - 只认已知字段（多出来的忽略），避免把无关内容塞进配置；
+    - 密钥类字段为空时不覆盖 —— 否则导入一份脱敏配置会把用户填好的 Key 清掉；
+    - relayout 做一次默认值补齐，防止旧版本配置缺键导致重排异常。
+    """
+    if not isinstance(data, dict):
+        return {}, []
+    incoming = {k: v for k, v in data.items()
+                if k in known and not str(k).startswith("_")}
+    for k in CONFIG_SECRETS:
+        if not incoming.get(k):
+            incoming.pop(k, None)
+    if isinstance(incoming.get("relayout"), dict):
+        incoming["relayout"] = {**RELAYOUT_DEFAULTS, **incoming["relayout"]}
+    cfg.update(incoming)
+    return incoming, sorted(incoming.keys())
+
+
 class Api:
     def __init__(self, workdir: str, get_window, asset_root: str):
         self.workdir = workdir
@@ -1467,6 +1508,76 @@ class Api:
         return {"ok": True, "added": len(added), "total": len(self.cfg["glossary"]),
                 "glossary": self.cfg["glossary"]}
 
+    CONFIG_SECRETS = ("api_key", "asr_key")
+
+    def export_config(self) -> dict:
+        """导出配置（默认去掉密钥），方便换机或备份。
+
+        密钥不落进备份文件是刻意的：这份 JSON 很可能被丢进网盘或发给别人。
+        """
+        win = self.get_window()
+        if not win:
+            return {"ok": False}
+        try:
+            import webview
+            res = win.create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename="笔记审查配置" + time.strftime("_%Y%m%d", time.localtime()),
+                file_types=("JSON 文件 (*.json)",))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not res:
+            return {"ok": False, "canceled": True}
+        path = res if isinstance(res, str) else res[0]
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        data, stripped = strip_config_for_export(self.cfg, _app_version())
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return {"ok": False, "error": f"写入失败：{e}"}
+        return {"ok": True, "path": path, "stripped": stripped}
+
+    def import_config(self) -> dict:
+        """从 JSON 恢复配置。当前配置先备份，再按键合并。"""
+        win = self.get_window()
+        if not win:
+            return {"ok": False}
+        try:
+            import webview
+            res = win.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=False,
+                file_types=("JSON 文件 (*.json)", "所有文件 (*.*)"))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not res:
+            return {"ok": False, "canceled": True}
+        path = res[0] if isinstance(res, (list, tuple)) else res
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            return {"ok": False, "error": f"读取失败：{e}"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "这个文件不是有效的配置文件"}
+        known = set(self._load_cfg().keys())
+        incoming, applied = merge_imported_config(self.cfg, data, known)
+        if not incoming:
+            return {"ok": False, "error": "文件里没有本程序认识的配置项"}
+        # 先备份当前配置，导错文件还能退回
+        try:
+            shutil.copy2(self.cfg_path, self.cfg_path + time.strftime(
+                ".before-import-%Y%m%d%H%M%S", time.localtime()))
+        except Exception:
+            pass
+        self._save_cfg()
+        self.history = hist.HistoryStore(
+            self.history_dir,
+            keep=int(self.cfg.get("history_keep", hist.KEEP_DEFAULT) or hist.KEEP_DEFAULT))
+        self._log(f"已从 {path} 导入配置，共 {len(incoming)} 项")
+        return {"ok": True, "applied": applied, "path": path}
+
     def _rebuild_relayout(self):
         if not self.relayout_on or not self.doc:
             self.relaid = None
@@ -1555,7 +1666,9 @@ class Api:
                     docmodel.export_docx(blocks, asset_dir, out_path, self.doc["title"],
                                          anns=self.anns)
                 else:
-                    docmodel.export_docx(blocks, asset_dir, out_path, self.doc["title"])
+                    # 重排版导出带一个真正的 Word 目录域，用户在 Word 里更新域即可
+                    docmodel.export_docx(blocks, asset_dir, out_path, self.doc["title"],
+                                         toc=(kind == "relayout"))
             elif fmt == "html":
                 docmodel.export_html(blocks, asset_dir, out_path, self.doc["title"])
             elif fmt == "md":

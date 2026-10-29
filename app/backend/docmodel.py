@@ -1231,6 +1231,80 @@ def _ensure_comment_styles(doc) -> None:
                 pass
 
 
+def _fld(par, instr: str, placeholder: str = "1") -> None:
+    """在段落末尾追加一个 Word 域（fldSimple），如 PAGE / NUMPAGES。"""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), instr)
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = placeholder
+    r.append(t)
+    fld.append(r)
+    par._p.append(fld)
+
+
+def _add_toc_field(doc) -> None:
+    """插入真正的 Word 目录域。
+
+    静态目录文字在 Word 里是「死」的，改了正文也不会跟着变；
+    目录域可以在 Word 里右键「更新域」自动重算。
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Pt, RGBColor
+
+    par = doc.add_paragraph()
+    run = par.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin.set(qn("w:dirty"), "true")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = ' TOC \\o "1-3" \\h \\z \\u '
+    sep = OxmlElement("w:fldChar")
+    sep.set(qn("w:fldCharType"), "separate")
+    for el in (begin, instr, sep):
+        run._r.append(el)
+    hint = par.add_run("（在 Word 中右键选择「更新域」即可生成目录）")
+    hint.font.size = Pt(9)
+    hint.font.color.rgb = RGBColor(0x8B, 0x95, 0xA8)
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    par.add_run()._r.append(end)
+    par.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+
+def _add_header_footer(doc, title: str = "") -> None:
+    """页眉放文档标题，页脚放「第 X 页」——导出的成品才像一份正式文档。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt, RGBColor
+
+    grey = RGBColor(0x8B, 0x95, 0xA8)
+    try:
+        sec = doc.sections[0]
+        if title:
+            hp = sec.header.paragraphs[0]
+            hp.text = ""
+            hp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            hr = hp.add_run(title)
+            hr.font.size = Pt(8)
+            hr.font.color.rgb = grey
+        fp = sec.footer.paragraphs[0]
+        fp.text = ""
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        a = fp.add_run("第 ")
+        _fld(fp, "PAGE")
+        b = fp.add_run(" 页")
+        for r in (a, b):
+            r.font.size = Pt(8.5)
+            r.font.color.rgb = grey
+    except Exception:
+        pass
+
+
 def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
                 title: str = "", toc: bool = False,
                 anns: List[Dict[str, Any]] | None = None,
@@ -1272,6 +1346,10 @@ def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
     if title:
         h = doc.add_heading(title, level=0)
         h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    if toc:
+        _add_toc_field(doc)
+    _add_header_footer(doc, title)
 
     # ---- 批注：只保留未被丢弃的，按文档顺序编号
     cids: Dict[str, int] = {}
@@ -1349,6 +1427,12 @@ def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
             try:
                 run = par.add_run()
                 run.add_picture(p, **kw)
+                # 把原文的图片替代文字带过去：Word 的「替代文字」与屏幕阅读器都用它
+                alt = (s.get("alt") or "").strip()
+                if alt:
+                    for dp in run._r.iter(DOCPR):
+                        dp.set("descr", alt)
+                        break
             except Exception:
                 pass
 

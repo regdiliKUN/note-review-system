@@ -783,9 +783,34 @@ function wire() {
     else toast((r && r.error) || '无法打开', 'err');
   };
 
+  // 配置备份 / 恢复
+  if ($('#btnExportCfg')) $('#btnExportCfg').onclick = async () => {
+    const r = await window.pywebview.api.export_config();
+    if (!r || r.ok === false) {
+      if (r && !r.canceled) toast(r.error || '导出失败', 'err');
+      return;
+    }
+    toast('配置已导出' + ((r.stripped || []).length ? '（密钥已移除）' : ''), 'ok');
+  };
+  if ($('#btnImportCfg')) $('#btnImportCfg').onclick = async () => {
+    const r = await window.pywebview.api.import_config();
+    if (!r || r.ok === false) {
+      if (r && !r.canceled) toast(r.error || '导入失败', 'err');
+      return;
+    }
+    toast(`已导入 ${r.applied.length} 项配置，建议重新打开设置确认`, 'ok');
+    // 让界面按新配置重新初始化
+    try {
+      const boot = await window.pywebview.api.boot();
+      fillSettings(boot);
+      S.models = boot.models || [];
+      fillModels(boot.model, S.models);
+      setHealth(boot.health);
+    } catch (e) { /* 忽略 */ }
+  };
+
   // 术语白名单导入 / 导出
-  if ($('#btnImportGlossary')) $('#btnImportGlossary').onclick = async () => {
-    const r = await window.pywebview.api.import_glossary();
+  if ($('#btnImportGlossary')) $('#btnImportGlossary').onclick = async () => {    const r = await window.pywebview.api.import_glossary();
     if (!r || r.ok === false) {
       if (r && !r.canceled) toast(r.error || '导入失败', 'err');
       return;
@@ -971,8 +996,8 @@ function wire() {
     if (e.key === '3') switchView('revised');
     if (e.key === '4') switchView('relayout');
     if (e.key === '5') switchView('images');
-    if (e.key === '6') switchView('compare');
     if (e.key === '6') switchView('summary');
+    if (e.key === '7') switchView('compare');
     if (e.key === '/') { e.preventDefault(); $('#annSearch').focus(); return; }
     if (e.key === '?') { e.preventDefault(); $('#keysMask').classList.add('on'); return; }
 
@@ -1071,7 +1096,11 @@ function renderAll() {
   $('#sbFile').textContent = p.doc.name;
   $('#sbFile').title = p.doc.path;
   $('#sbImg').textContent = p.doc.images;
-  $('#sbBlocks').textContent = p.doc.blocks + ' 段';
+  const fb = (p.failedBlocks || []).length;
+  const sb = $('#sbBlocks');
+  sb.textContent = p.doc.blocks + ' 段' + (fb ? ` · ${fb} 段未审` : '');
+  sb.className = 'sb-item' + (fb ? ' sb-warn' : '');
+  sb.title = fb ? `${fb} 个段落上次没有审查成功，可点提示条上的「补审这几段」` : '';
   $('#annTotal').textContent = p.stats.total;
   const pend = p.stats.pending || 0;
   $('#tabAnnCount').textContent = pend;
@@ -1415,9 +1444,26 @@ function renderSummary(paper) {
   const s = (S.p && S.p.summary) || {};
   const has = s.summary || (s.key_points && s.key_points.length)
     || (s.outline && s.outline.length) || (s.gaps && s.gaps.length);
+
+  // 健康度与归纳是否生成无关：只要审查过就该给用户一个可读的整体判断
+  const hs = (S.p && S.p.anns && S.p.anns.length)
+    ? lib.healthScore(S.p.views.original, S.p.anns,
+        { failed: (S.p.failedBlocks || []).length, rejected: (S.p.stats || {}).rejected || 0 })
+    : null;
+  const healthHtml = hs ? `<div class="health health-${hs.level}">
+      <div class="health-score">${hs.score}<span>/100</span></div>
+      <div class="health-main">
+        <div class="health-label">文档健康度 · ${hs.label}</div>
+        <div class="health-detail">${hs.detail.chars} 字 · ${hs.detail.total} 条批注
+          （高 ${hs.detail.high} / 待处理 ${hs.detail.pending}）
+          · 每千字 ${hs.detail.density} 条</div>
+        ${hs.advice ? `<div class="health-advice">${esc(hs.advice)}</div>` : ''}
+      </div>
+    </div>` : '';
+
   if (!has) {
     const reviewed = !!(S.p && S.p.anns && S.p.anns.length);
-    paper.innerHTML = `<div class="sum-empty">
+    paper.innerHTML = healthHtml + `<div class="sum-empty">
       <div class="sum-empty-ico">◈</div>
       <p class="sum-empty-t">还没有内容归纳</p>
       <p class="sum-empty-s">${reviewed
@@ -1430,7 +1476,7 @@ function renderSummary(paper) {
   const flagged = (ir.items || []).filter(it => it.sensitive || it.inconsistent || it.needs_check);
   const stat = S.p.stats || {};
 
-  let html = '<div class="sum-head">';
+  let html = healthHtml + '<div class="sum-head">';
   html += `<div class="sum-title">内容归纳</div>`;
   html += `<div class="sum-sub">基于 ${S.p.doc.blocks} 段 / ${S.p.doc.images} 张图片`
     + (s.map_reduce ? ` · 长文档分段提炼（覆盖 ${s.covered || 0} 字要点）` : '')
