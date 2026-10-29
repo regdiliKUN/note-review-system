@@ -46,6 +46,15 @@ def _sha(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()[:10]
 
 
+def _text_hash(block: dict) -> str:
+    """段落文本指纹（只算文字，不算图片），用于增量审查复用。"""
+    import hashlib
+    t = docmodel.block_text_only(block).strip()
+    if not t:
+        return ""
+    return hashlib.md5(t.encode("utf-8")).hexdigest()[:16]
+
+
 def _app_version() -> str:
     try:
         import main as _m
@@ -645,6 +654,8 @@ class Api:
                 "blocks": len(self.doc["blocks"]),
                 "images": docmodel.count_images(self.doc["blocks"]),
                 "title": self.doc.get("title", ""),
+                # 段落文本指纹：下次增量审查据此判断「哪些段落没变、批注可以复用」
+                "block_hashes": {b["id"]: _text_hash(b) for b in self.doc["blocks"]},
             }
             entry = self.history.save(self.doc["path"], snap)
             self.history_current = {"id": entry["id"], "ts": entry.get("ts") or "",
@@ -906,6 +917,50 @@ class Api:
         except Exception:
             pass
 
+    def _prev_reuse(self):
+        """上一次审查的可复用信息。
+
+        返回 (已审过的段落指纹集合, {指纹: [该段当时的批注组, ...]})。
+        同一段文字在文档里出现多次时，用「组队列」保证每条批注只被复用一次。
+        """
+        empty = (set(), {})
+        if not self.doc:
+            return empty
+        try:
+            ents = self.history.entries(self.doc["path"])
+            if not ents:
+                return empty
+            snap = self.history.read(self.doc["path"], ents[0]["id"]) or {}
+        except Exception:
+            return empty
+        hashes = snap.get("block_hashes") or {}
+        if not hashes:
+            return empty
+        by_block: dict = {}
+        for a in (snap.get("anns") or []):
+            by_block.setdefault(a.get("block_id"), []).append(a)
+        seen = {h for h in hashes.values() if h}
+        pools: dict = {}
+        for bid, h in hashes.items():
+            if not h:
+                continue
+            pools.setdefault(h, []).append(by_block.get(bid, []))
+        return seen, pools
+
+    def can_incremental(self) -> dict:
+        """能否做增量审查，以及有多少段落需要重审。"""
+        if not self.doc:
+            return {"ok": False, "possible": False, "reason": "请先导入笔记"}
+        seen, _pools = self._prev_reuse()
+        if not seen:
+            return {"ok": True, "possible": False,
+                    "reason": "还没有可复用的历史审查，需要先完整审查一次"}
+        total = len(self.doc["blocks"])
+        changed = sum(1 for b in self.doc["blocks"] if _text_hash(b) not in seen)
+        return {"ok": True, "possible": changed < total,
+                "changed": changed, "unchanged": total - changed, "total": total,
+                "reason": "" if changed < total else "所有段落都改动过，增量审查没有意义"}
+
     def cancel_review(self) -> dict:
         """请求中止当前审查。当前分块跑完后停下，已完成的批注全部保留。"""
         if not self.busy:
@@ -914,7 +969,7 @@ class Api:
         self._log("用户请求取消审查")
         return {"ok": True, "message": "已请求停止，正在收尾（已完成的分块会保留）"}
 
-    def run_review(self, do_summary: bool = True) -> dict:
+    def run_review(self, do_summary: bool = True, incremental: bool = False) -> dict:
         if not self.doc:
             return {"ok": False, "error": "请先导入笔记"}
         if self.busy:
@@ -945,17 +1000,56 @@ class Api:
 
         try:
             prog("正在准备…", 0.02)
+
+            # ---- 增量审查：没改动过的段落直接复用上次批注，不再送模型
+            reused: list = []
+            only_ids = None
+            if incremental:
+                seen, pools = self._prev_reuse()
+                if seen:
+                    only_ids = set()
+                    for b in self.doc["blocks"]:
+                        h = _text_hash(b)
+                        if h and h in seen:
+                            grp = pools.get(h) or []
+                            group = grp.pop(0) if grp else []
+                            for a in group:
+                                na = review.relocate(a, b)
+                                if na:
+                                    na["reused"] = True
+                                    reused.append(na)
+                            continue
+                        only_ids.add(b["id"])
+                    if not only_ids:
+                        # 一个字都没改：没必要再跑模型
+                        self.anns = review.finalize(reused)
+                        self.blocks_current = review.apply_accepted(
+                            self.doc["blocks"], self.anns)
+                        self._rebuild_relayout()
+                        self.busy = False
+                        return self._payload(extra={
+                            "reviewed": True, "incremental": True,
+                            "reusedCount": len(reused), "elapsed": 0,
+                            "warnings": ["文档与上次审查完全一致，已直接复用上次结果，没有调用模型。"],
+                        })
+                    prog(f"增量审查：{len(only_ids)} 段有改动，"
+                         f"{len(self.doc['blocks']) - len(only_ids)} 段直接复用…", 0.05)
+
             rep: dict = {}
-            anns = review_document(
+            new_anns = review_document(
                 self.doc, llm, on_progress=prog, report=rep,
                 level=str(self.cfg.get("review_level") or "normal"),
                 glossary=self.cfg.get("glossary") or [],
-                should_stop=self._cancel.is_set)
-            self.anns = anns
+                should_stop=self._cancel.is_set,
+                only_ids=only_ids)
+            if incremental and reused:
+                self.anns = review.finalize(reused + new_anns)
+            else:
+                self.anns = new_anns
             canceled = bool(rep.get("canceled"))
             if canceled:
                 # 取消时跳过图像理解与摘要（这两个最耗时），直接落盘已完成的部分
-                self._log(f"审查已取消，保留 {len(anns)} 条批注")
+                self._log(f"审查已取消，保留 {len(self.anns)} 条批注")
             else:
                 # 图像理解：生成说明、标注位置、识别敏感/不一致/需人工核对
                 self.image_report = analyze_images(
@@ -982,9 +1076,12 @@ class Api:
             entry = self._save_history(elapsed)      # 自动持久化本次审查
             self.busy = False
             warnings = []
+            if incremental and reused:
+                warnings.append(f"增量审查：{len(reused)} 条批注沿用上次结果，"
+                                f"本次只把有改动的段落送去模型。")
             if canceled:
                 warnings.append(f"审查已取消：完成 {rep.get('done_chunks', 0)}/{rep.get('chunks', '?')} 段，"
-                                f"保留 {len(anns)} 条批注。未完成的部分可稍后重新审查。")
+                                f"保留 {len(self.anns)} 条批注。未完成的部分可稍后重新审查。")
             if rep.get("failed"):
                 detail = "；".join(f"第 {f['chunk']} 段（{f['error'][:60]}）"
                                    for f in rep["failed"][:3])
@@ -1002,6 +1099,8 @@ class Api:
                 "elapsed": elapsed,
                 "reviewed": True,
                 "canceled": canceled,
+                "incremental": bool(incremental and reused),
+                "reusedCount": len(reused) if incremental else 0,
                 "historySaved": entry,
                 "reviewReport": rep,
                 "warnings": warnings,

@@ -2130,5 +2130,109 @@ class TestSummaryExport(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════ 增量审查
+class TestIncremental(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_inc_")
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, text):
+        p = os.path.join(self.tmp, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return p
+
+    def _seed_history(self, path, anns):
+        """伪造一次完整审查的结果，写入历史（含段落指纹）。"""
+        self.api.load(path)
+        self.api.anns = anns
+        return self.api._save_history(1.0)
+
+    def test_text_hash_stable(self):
+        from backend.api import _text_hash
+        b1 = para(txt("同样的内容。"))
+        b2 = para(txt("同样的内容。"))
+        b3 = para(txt("不一样的内容。"))
+        self.assertEqual(_text_hash(b1), _text_hash(b2))
+        self.assertNotEqual(_text_hash(b1), _text_hash(b3))
+        self.assertEqual(_text_hash(para(txt("   "))), "")
+
+    def test_relocate_remaps_block_and_anchor(self):
+        old = {"id": "a1", "block_id": "b9", "op": "replace_sentence",
+               "target": "第二句。", "replacement": "改。", "type": "表达优化",
+               "reason": "r", "severity": "low", "status": "pending",
+               "anchor": [0, 99, 0, 99], "sid": 0}
+        blk = {"id": "b2", "kind": "para", "level": 0, "segs": [txt("第一句。第二句。")]}
+        out = review.relocate(old, blk)
+        self.assertEqual(out["block_id"], "b2")
+        self.assertEqual(out["anchor"], [0, 4, 0, 8])
+
+    def test_relocate_drops_when_target_missing(self):
+        old = {"id": "a1", "block_id": "b9", "op": "replace_sentence",
+               "target": "不存在。", "replacement": "x", "type": "表达优化",
+               "reason": "r", "severity": "low", "status": "pending", "anchor": [0, 0, 0, 1]}
+        blk = {"id": "b2", "kind": "para", "level": 0, "segs": [txt("第一句。")]}
+        self.assertIsNone(review.relocate(old, blk))
+
+    def test_relocate_comment_needs_no_anchor(self):
+        old = {"id": "a1", "block_id": "b9", "op": "comment", "type": "结构建议",
+               "target": "", "replacement": "", "reason": "建议分节",
+               "severity": "low", "status": "pending", "anchor": None}
+        blk = {"id": "b2", "kind": "para", "level": 0, "segs": [txt("文字。")]}
+        out = review.relocate(old, blk)
+        self.assertEqual(out["block_id"], "b2")
+        self.assertIsNone(out["anchor"])
+
+    def test_can_incremental_without_history(self):
+        p = self._write("a.txt", "标题\n\n第一句。\n")
+        self.api.load(p)
+        r = self.api.can_incremental()
+        self.assertFalse(r["possible"])
+        self.assertIn("完整审查", r["reason"])
+
+    def test_can_incremental_after_history(self):
+        p = self._write("a.txt", "标题\n\n第一句。第二句。\n")
+        self._seed_history(p, [])
+        r = self.api.can_incremental()
+        self.assertTrue(r["possible"])
+        self.assertEqual(r["changed"], 0)
+        self.assertEqual(r["unchanged"], r["total"])
+
+    def test_can_incremental_detects_changes(self):
+        p = self._write("a.txt", "标题\n\n第一句。\n")
+        self._seed_history(p, [])
+        # 改一句再导入
+        self._write("a.txt", "标题\n\n第一句改过了。\n")
+        self.api.load(p)
+        r = self.api.can_incremental()
+        self.assertTrue(r["possible"])
+        self.assertGreater(r["changed"], 0)
+        self.assertGreater(r["unchanged"], 0)
+
+    def test_history_stores_block_hashes(self):
+        p = self._write("a.txt", "标题\n\n第一句。\n")
+        e = self._seed_history(p, [])
+        snap = self.api.history.read(p, e["id"])
+        self.assertIn("block_hashes", snap)
+        self.assertEqual(len(snap["block_hashes"]), len(self.api.doc["blocks"]))
+
+    def test_finalize_merges_and_reindexes(self):
+        anns = [
+            {"id": "x1", "block_id": "b2", "op": "comment", "type": "结构建议",
+             "severity": "low", "status": "pending", "anchor": None},
+            {"id": "x2", "block_id": "b0", "op": "comment", "type": "事实纠错",
+             "severity": "high", "status": "pending", "anchor": None},
+        ]
+        out = review.finalize(anns)
+        self.assertEqual([a["id"] for a in out], ["a1", "a2"])
+        self.assertEqual(out[0]["severity"], "high", "高优先级排前面")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

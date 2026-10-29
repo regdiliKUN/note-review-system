@@ -448,6 +448,18 @@ function wire() {
     toast(e.target.checked ? '已生成重新排版版本' : '已关闭重新排版', 'ok');
   };
 
+  // 增量审查开关：不可用时自动禁用并说明原因
+  $('#chkIncremental').onchange = async e => {
+    if (!e.target.checked) return;
+    const r = await window.pywebview.api.can_incremental();
+    if (!r || !r.possible) {
+      e.target.checked = false;
+      toast((r && r.reason) || '当前无法增量审查', 'err');
+      return;
+    }
+    toast(`增量审查：将只重审 ${r.changed}/${r.total} 段有改动的内容`, 'ok');
+  };
+
   $('#modelSelect').onchange = async e => {
     await window.pywebview.api.set_model(e.target.value);
     toast('已切换模型：' + e.target.value, 'ok');
@@ -876,9 +888,10 @@ function handlePayload(r) {
   if (first) switchView('annotated');
   if (r.error) toast(r.error, 'err');
   if (r.reviewed) {
+    const extra = r.reusedCount ? `（其中 ${r.reusedCount} 条沿用上次）` : '';
     toast(r.canceled
       ? `已停止审查，保留 ${r.anns.length} 条批注`
-      : `审查完成，共 ${r.anns.length} 条批注，用时 ${r.elapsed}s`,
+      : `审查完成，共 ${r.anns.length} 条批注${extra}，用时 ${r.elapsed}s`,
       r.canceled ? '' : 'ok');
   }
   (r.warnings || []).forEach(w => toast(w, 'err'));
@@ -1296,6 +1309,8 @@ function annCardHtml(a, idxOf) {
     <div class="ac-top">
       <span class="type-badge" style="background:${c}22;color:${c}">${esc(a.type)}</span>
       <span class="ann-idx">#${idxOf(a.id)}</span>
+      ${a.reused ? '<span class="reuse-tag" title="段落未改动，沿用上次审查结果">沿用</span>' : ''}
+      ${a.edited ? '<span class="edit-tag" title="替换文本已手动修改">已改</span>' : ''}
       <i class="sev-dot ${a.severity}" title="${esc(a.severity)}"></i>
     </div>
     <div class="ac-diff">${diff}</div>
@@ -1511,7 +1526,7 @@ async function doReview() {
     }
   } catch (e) { /* 估算失败不影响主流程 */ }
   try {
-    const r = await window.pywebview.api.run_review(true);
+    const r = await window.pywebview.api.run_review(true, !!$('#chkIncremental').checked);
     if (r.ok === false) toast(r.error, 'err');
     else handlePayload(r);
   } catch (e) {

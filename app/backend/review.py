@@ -455,6 +455,41 @@ def render_tokens(block: Dict[str, Any], anns: List[Dict[str, Any]],
 
 
 # ---------------------------------------------------------------- 统计
+def relocate(a: Dict[str, Any], block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把一条旧批注搬到「内容相同」的新段落上。
+
+    增量审查复用的是「文本完全一致」的段落，但段落编号会变（前面插了段），
+    因此 block_id 必须重映射；anchor 也不能直接沿用 —— 片段结构可能变了
+    （比如图片挪了位置），所以按 target 原文重新定位一次。
+    """
+    nb = dict(a)
+    nb["block_id"] = block["id"]
+    if nb.get("op") == "comment":
+        nb["anchor"] = None
+        return nb
+    target = (nb.get("target") or "").strip()
+    if not target:
+        return None
+    loc = locate(block.get("segs", []), target)
+    if loc is None:
+        return None
+    if nb.get("op") == "insert_after":
+        nb["anchor"] = [loc[2], loc[3], loc[2], loc[3]]
+    else:
+        nb["anchor"] = list(loc)
+    return nb
+
+
+def finalize(anns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """收尾：消解冲突 → 按严重度排序 → 重排 id。"""
+    out = dedupe_conflicts(anns)
+    out.sort(key=lambda a: (SEVERITY_ORDER.get(a.get("severity"), 1),
+                            int(a["block_id"][1:]) if a["block_id"][1:].isdigit() else 0))
+    for i, a in enumerate(out):
+        a["id"] = f"a{i + 1}"
+    return out
+
+
 def stats(anns: List[Dict[str, Any]]) -> Dict[str, Any]:
     """统计批注。status 只认三个合法值，避免脏数据把 total 之类的键覆盖掉。"""
     d = {"total": len(anns), "pending": 0, "accepted": 0, "rejected": 0, "by_type": {}}

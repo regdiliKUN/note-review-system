@@ -770,3 +770,10 @@ textarea:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140
 .sum-empty-ico{font-size:34px;color:#c8d2e2;margin-bottom:12px}
 .sum-empty-t{font-size:15px;margin-bottom:8px;color:#5b6472}
 .sum-empty-s{font-size:13px;line-height:1.9;max-width:460px;margin:0 auto}
+
+/* 增量审查标记 */
+.reuse-tag,.edit-tag{
+  font-size:10px;padding:1px 6px;border-radius:20px;letter-spacing:.3px;
+}
+.reuse-tag{background:rgba(148,163,184,.16);color:#94a3b8}
+.edit-tag{background:rgba(79,140,255,.16);color:#7eb0ff}

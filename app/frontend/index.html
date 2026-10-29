@@ -150,11 +150,16 @@
             <div class="progress-bar"><i id="progressFill"></i></div>
             <span id="progressTxt">准备中…</span>
           </div>
-          <label class="switch" title="开启后生成重排版本">
-            <input type="checkbox" id="chkRelayout">
-            <span class="slider"></span>
-            <span class="switch-lbl">重新排版</span>
-          </label>
+      <label class="switch" id="incWrap" title="只重审改动过的段落，未改动的段落沿用上次批注">
+        <input type="checkbox" id="chkIncremental">
+        <span class="slider"></span>
+        <span class="switch-lbl">增量</span>
+      </label>
+      <label class="switch" title="开启后生成重排版本">
+        <input type="checkbox" id="chkRelayout">
+        <span class="slider"></span>
+        <span class="switch-lbl">重新排版</span>
+      </label>
         </div>
       </div>
 

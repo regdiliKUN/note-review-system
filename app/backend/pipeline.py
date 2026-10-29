@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List
 from .docmodel import block_plain, block_text_only
 from .llm import LLM, LLMError, VisionUnsupported, extract_json
 from .review import (block_sentences, build_annotation, dedupe_conflicts,
+                     finalize as review_finalize,
                      keep_annotation as review_keep)
 
 SYSTEM_REVIEW = """你是一位资深的中文笔记审校与知识编辑专家。用户会给你一篇零散的个人笔记，\
@@ -238,17 +239,21 @@ def review_document(doc: Dict[str, Any], llm: LLM,
                     report: Dict[str, Any] | None = None,
                     level: str = "normal",
                     glossary: list | None = None,
-                    should_stop: Callable[[], bool] | None = None
+                    should_stop: Callable[[], bool] | None = None,
+                    only_ids: set | None = None
                     ) -> List[Dict[str, Any]]:
     """逐块送审。单块失败不会拖垮整篇 —— 失败的分块会记进 report。
 
     should_stop 返回 True 时在分块之间停下（用户点了取消），
     已完成的批注全部保留，不会白跑。
+    only_ids 非空时只审这些段落（增量审查用），其余段落直接跳过。
     """
     blocks = doc["blocks"]
+    if only_ids is not None:
+        blocks = [b for b in blocks if b["id"] in only_ids]
     pieces = _pieces(blocks)
     chunks = _chunk_pieces(pieces)
-    by_id = {b["id"]: b for b in blocks}
+    by_id = {b["id"]: b for b in doc["blocks"]}
     # 每个段落的句子切分只做一次，供所有批注复用
     sents_map: Dict[str, List[Dict[str, Any]]] = {}
     for p in pieces:
@@ -319,12 +324,8 @@ def review_document(doc: Dict[str, Any], llm: LLM,
 
     # 同一句的冲突改写只留一条，再按严重度排序
     before = len(anns)
-    anns = dedupe_conflicts(anns)
+    anns = review_finalize(anns)
     conflicts = before - len(anns)
-    anns.sort(key=lambda a: (SEVERITY_RANK(a["severity"]),
-                             int(a["block_id"][1:]) if a["block_id"][1:].isdigit() else 0))
-    for i, a in enumerate(anns):
-        a["id"] = f"a{i + 1}"
     if report is not None:
         report.update({"chunks": len(chunks), "failed": failed, "empty": empty,
                        "annotations": len(anns), "dropped": dropped,

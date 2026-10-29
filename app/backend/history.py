@@ -24,17 +24,28 @@ _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 # ---------------------------------------------------------------- 目录解析
+# 可写性探测要真落一次盘，而 resolve_history_dir 会连着探好几个候选目录。
+# 结果在进程内缓存：同一次会话里没必要反复试探同一个路径（I 盘是移动盘时尤其慢）。
+_WRITABLE_CACHE: dict = {}
+
+
 def _writable(d: str) -> bool:
     """真正落一次盘来判断可写，避免「目录能建但写不进」的假阳性。"""
+    key = os.path.normcase(os.path.abspath(d))
+    hit = _WRITABLE_CACHE.get(key)
+    if hit is not None:
+        return hit
     try:
         os.makedirs(d, exist_ok=True)
         probe = os.path.join(d, ".write_test")
         with open(probe, "w", encoding="utf-8") as f:
             f.write("ok")
         os.remove(probe)
-        return True
+        ok = True
     except Exception:
-        return False
+        ok = False
+    _WRITABLE_CACHE[key] = ok
+    return ok
 
 
 def resolve_history_dir(configured: str, app_root: str) -> tuple[str, str, str]:
