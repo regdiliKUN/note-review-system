@@ -69,13 +69,44 @@ REVIEW_LEVELS = {
               "并主动补充关键缺失的定义与前提。允许给出较多批注。",
 }
 
+# 审查场景：不同类型的笔记，值得关心的东西完全不同。
+# 与其让用户自己写一大段提示词，不如给几个开箱可用的关注点。
+REVIEW_SCENARIOS = {
+    "general": ("通用笔记", ""),
+    "paper": ("论文 / 学术",
+              "这是一篇学术性笔记：请特别关注概念定义是否准确、引用与出处是否缺失、"
+              "论证是否有跳跃、术语前后是否一致。不要为了口语顺滑去改写学术表达。"),
+    "meeting": ("会议记录",
+                "这是一份会议记录：请特别关注决议与行动项是否明确（谁、做什么、何时）、"
+                "人名与部门名是否前后一致、是否有结论缺失、时间地点等事实是否自相矛盾。"),
+    "study": ("学习笔记",
+              "这是一份学习笔记：请特别关注定义是否完整、例子是否缺失、"
+              "易混淆概念是否被混为一谈、推导步骤是否有跳步。可以主动补充关键前提。"),
+    "code": ("技术 / 代码笔记",
+             "这是一份技术笔记：请特别关注 API 名称、参数、版本号、命令是否正确，"
+             "代码块内的标识符不要改写；概念解释与官方文档冲突时要指出。"),
+    "product": ("产品 / 需求",
+                "这是一份产品需求笔记：请特别关注边界条件是否定义、角色权限是否清楚、"
+                "异常流程是否缺失、指标口径是否明确。"),
+}
+
+
+def scenario_focus(key: str) -> str:
+    item = REVIEW_SCENARIOS.get((key or "general").lower())
+    return item[1] if item else ""
+
+
 SUMMARY_DIRECT_LIMIT = 6000     # 超过这个字数就走 map-reduce
 
 
-def _system_review(level: str = "normal", glossary: list | None = None) -> str:
+def _system_review(level: str = "normal", glossary: list | None = None,
+                   scenario: str = "general") -> str:
     parts = [SYSTEM_REVIEW]
     lvl = REVIEW_LEVELS.get((level or "normal").lower(), REVIEW_LEVELS["normal"])
     parts.append(f"\n本次审校力度：{lvl}")
+    focus = scenario_focus(scenario)
+    if focus:
+        parts.append(f"\n笔记类型侧重：{focus}")
     if glossary:
         terms = [str(g).strip() for g in glossary if str(g).strip()][:80]
         if terms:
@@ -240,7 +271,8 @@ def review_document(doc: Dict[str, Any], llm: LLM,
                     level: str = "normal",
                     glossary: list | None = None,
                     should_stop: Callable[[], bool] | None = None,
-                    only_ids: set | None = None
+                    only_ids: set | None = None,
+                    scenario: str = "general"
                     ) -> List[Dict[str, Any]]:
     """逐块送审。单块失败不会拖垮整篇 —— 失败的分块会记进 report。
 
@@ -266,7 +298,7 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     empty = 0
     dropped = 0
     canceled = False
-    system = _system_review(level, glossary)
+    system = _system_review(level, glossary, scenario)
     doc_ctx = _doc_context(doc)
     prev_tail = ""
 

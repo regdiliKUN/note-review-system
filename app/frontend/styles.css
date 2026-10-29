@@ -777,3 +777,40 @@ textarea:focus{border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140
 }
 .reuse-tag{background:rgba(148,163,184,.16);color:#94a3b8}
 .edit-tag{background:rgba(79,140,255,.16);color:#7eb0ff}
+
+/* ══════════ 页内查找 ══════════ */
+.find-wrap{display:flex;align-items:center;gap:6px}
+.find-input{
+  width:132px;height:26px;padding:0 9px;border-radius:7px;font-size:11.5px;
+  background:var(--panel-2);border:1px solid var(--border);color:var(--txt);outline:none;
+  transition:.15s;
+}
+.find-input:focus{width:180px;border-color:rgba(79,140,255,.6);
+  box-shadow:0 0 0 3px rgba(79,140,255,.12)}
+.find-count{font-size:10.5px;color:var(--txt-3);min-width:34px}
+.find-hit{background:rgba(250,204,21,.55);color:#3b2f00;border-radius:2px;padding:0 1px}
+.find-hit.cur{background:#f59e0b;color:#1a1200;box-shadow:0 0 0 2px rgba(245,158,11,.35)}
+
+/* ══════════ 大纲批注数徽标 ══════════ */
+.toc-item{display:flex;align-items:center;gap:6px}
+.toc-txt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toc-n{
+  flex:none;font-style:normal;font-size:10px;font-weight:600;
+  min-width:16px;height:16px;padding:0 4px;border-radius:9px;
+  display:inline-grid;place-items:center;
+  background:rgba(79,140,255,.18);color:#7eb0ff;
+}
+
+/* ══════════ 纸张主题 ══════════ */
+.paper-sepia{background:#fbf7ee;color:#2b2418}
+.paper-sepia td,.paper-sepia th{border-color:#e0d7c4}
+.paper-sepia h1,.paper-sepia h2,.paper-sepia h3,.paper-sepia h4{color:#2b2418}
+.paper-night{background:#1b2029;color:#d6dce8}
+.paper-night td,.paper-night th{border-color:#39414f;color:#d6dce8}
+.paper-night h1,.paper-night h2,.paper-night h3,.paper-night h4{color:#eaf0fa}
+.paper-night h1{border-bottom-color:#39414f}
+.paper-night .mk,.paper-night .ins{color:#1b2029}
+.paper-night img{opacity:.92}
+
+/* 设置页场景按钮可换行 */
+.seg-wrap{flex-wrap:wrap}

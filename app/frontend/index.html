@@ -135,7 +135,13 @@
           </button>
         </div>
         <div class="viewbar-right">
+          <div class="find-wrap">
+            <input type="search" id="findInput" class="find-input"
+                   placeholder="页内查找（Ctrl+F）" autocomplete="off">
+            <span class="find-count" id="findCount"></span>
+          </div>
           <div class="fontctl" id="fontCtl">
+            <button class="icon-btn sm" id="btnPaperTheme" title="切换纸张主题（白 / 米黄 / 夜间）">◐</button>
             <button class="icon-btn sm" id="btnFontMinus" title="减小正文字号（Ctrl -）">A−</button>
             <button class="icon-btn sm" id="btnFontPlus" title="增大正文字号（Ctrl +）">A+</button>
           </div>
@@ -331,6 +337,11 @@
           <button class="btn btn-ghost btn-sm" id="btnOpenHistDir2">打开文件夹</button>
         </div>
         <div class="hint" id="histDirHint">每次审查完成后自动保存；再次打开同一文件会直接载入，不重复调用模型。</div>
+      </div>
+      <div class="field">
+        <label>笔记场景</label>
+        <div class="seg seg-wrap" id="scenarioSeg"></div>
+        <div class="hint" id="scenarioHint">不同类型笔记值得关心的东西不同：论文重引用与定义，会议记录重行动项与人名，技术笔记重 API 与版本号。</div>
       </div>
       <div class="field">
         <label>审校力度</label>

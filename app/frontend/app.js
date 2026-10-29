@@ -28,8 +28,20 @@ const S = {
   fontSize: 0,          // -2..+4，作用在 .paper 的字号上
   startedAt: 0,
   lastMsg: '',
-  imgPage: 1
+  imgPage: 1,
+  find: '',
+  findIdx: 0,
+  paperTheme: 0,
+  level: 'normal',
+  scenario: 'general',
+  numberStyle: 'cn'
 };
+
+const PAPER_THEMES = [
+  { key: '', label: '白' },
+  { key: 'sepia', label: '米黄' },
+  { key: 'night', label: '夜间' }
+];
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -100,6 +112,8 @@ function fillSettings(boot) {
 
   // 审校力度与术语白名单
   S.level = boot.reviewLevel || 'normal';
+  S.scenario = boot.reviewScenario || 'general';
+  if (S._renderScenarios) S._renderScenarios(boot.scenarios || []);
   $$('#levelSeg button').forEach(b => b.classList.toggle('active', b.dataset.l === S.level));
   if ($('#inpGlossary')) $('#inpGlossary').value = (boot.glossary || []).join('、');
   if ($('#levelHint')) {
@@ -423,6 +437,40 @@ function wire() {
     }
   } catch (e) {}
 
+  // 纸张主题
+  $('#btnPaperTheme').onclick = () => {
+    S.paperTheme = (S.paperTheme + 1) % PAPER_THEMES.length;
+    applyPaperTheme();
+    toast('纸张主题：' + PAPER_THEMES[S.paperTheme].label, '');
+  };
+  try {
+    const pt = parseInt(localStorage.getItem('nr.paperTheme') || '0', 10);
+    if (!isNaN(pt) && pt) { S.paperTheme = pt % PAPER_THEMES.length; applyPaperTheme(); }
+  } catch (e) {}
+
+  // 页内查找
+  let fTimer = null;
+  $('#findInput').oninput = e => {
+    clearTimeout(fTimer);
+    const v = e.target.value;
+    fTimer = setTimeout(() => {
+      S.find = v.trim();
+      S.findIdx = 0;
+      renderDoc();
+      updateFindCount();
+    }, 160);
+  };
+  $('#findInput').onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Escape') {
+      $('#findInput').value = '';
+      S.find = ''; S.findIdx = 0;
+      renderDoc(); updateFindCount();
+      $('#findInput').blur();
+    }
+    e.stopPropagation();
+  };
+
   // 快捷键面板
   const openKeys = () => $('#keysMask').classList.add('on');
   $('#btnKeys').onclick = openKeys;
@@ -565,6 +613,20 @@ function wire() {
     $$('#provSeg button').forEach(x => x.classList.toggle('active', x === b));
     $('#fieldKey').style.display = S.provider === 'openai' ? '' : 'none';
   });
+  // 笔记场景
+  const renderScenarios = list => {
+    const box = $('#scenarioSeg');
+    if (!box) return;
+    box.innerHTML = (list || []).map(s =>
+      `<button data-s="${esc(s.key)}" class="${s.key === S.scenario ? 'active' : ''}">${esc(s.label)}</button>`
+    ).join('');
+    $$('#scenarioSeg button').forEach(b => b.onclick = () => {
+      S.scenario = b.dataset.s;
+      $$('#scenarioSeg button').forEach(x => x.classList.toggle('active', x === b));
+    });
+  };
+  S._renderScenarios = renderScenarios;
+
   $$('#levelSeg button').forEach(b => b.onclick = () => {
     S.level = b.dataset.l;
     $$('#levelSeg button').forEach(x => x.classList.toggle('active', x === b));
@@ -613,7 +675,8 @@ function wire() {
     if (md) { renderMediaCaps(md.media, md.vision); S.media = md.media; }
     // 审校力度与术语白名单
     if ($('#inpGlossary')) {
-      await window.pywebview.api.set_review_opts(S.level || 'normal', $('#inpGlossary').value);
+      await window.pywebview.api.set_review_opts(
+        S.level || 'normal', $('#inpGlossary').value, S.scenario || 'general');
     }
     const opts = {};
     $$('.checks input').forEach(c => opts[c.dataset.opt] = c.checked);
@@ -794,6 +857,7 @@ function wire() {
     if (typing) return;
 
     if (e.ctrlKey || e.metaKey) {
+      if (e.key.toLowerCase() === 'f') { e.preventDefault(); $('#findInput').focus(); return; }
       if (e.key === '=' || e.key === '+') { e.preventDefault(); $('#btnFontPlus').click(); return; }
       if (e.key === '-') { e.preventDefault(); $('#btnFontMinus').click(); return; }
       if (e.key.toLowerCase() === 'z') { e.preventDefault(); undoLast(); return; }
@@ -953,10 +1017,31 @@ function renderToc() {
   const list = (S.view === 'relayout' && S.p.views.relayout) ? S.p.views.relayout.toc : S.p.toc;
   $('#tocCount').textContent = list.length;
   if (!list.length) { $('#tocList').innerHTML = '<div class="empty-mini">无标题结构</div>'; return; }
-  $('#tocList').innerHTML = list.map(t =>
-    `<button class="toc-item l${Math.min(t.level || 1, 3)}" data-id="${t.id}"
-             title="${esc(t.full || t.text)}">${esc(t.full || t.text)}</button>`
-  ).join('');
+  const counts = annCountByHeading();
+  $('#tocList').innerHTML = list.map(t => {
+    const n = counts[t.id] || 0;
+    return `<button class="toc-item l${Math.min(t.level || 1, 3)}" data-id="${t.id}"
+             title="${esc(t.full || t.text)}${n ? `（${n} 条批注）` : ''}">
+             <span class="toc-txt">${esc(t.full || t.text)}</span>
+             ${n ? `<em class="toc-n">${n}</em>` : ''}
+           </button>`;
+  }).join('');
+}
+
+/* 把每条批注归到它所在小节（最近的前一个标题）下 */
+function annCountByHeading() {
+  const view = (S.p && S.p.views && S.p.views.annotated) || [];
+  const byBlock = {};
+  ((S.p && S.p.anns) || []).forEach(a => {
+    byBlock[a.block_id] = (byBlock[a.block_id] || 0) + 1;
+  });
+  const out = {};
+  let cur = null;
+  for (const b of view) {
+    if (b.kind === 'heading') cur = b.id;
+    if (cur && byBlock[b.id]) out[cur] = (out[cur] || 0) + byBlock[b.id];
+  }
+  return out;
 }
 
 function renderTypeStats() {
@@ -993,8 +1078,9 @@ function annMap() {
 
 function tokHtml(tokens, docId, am) {
   let n = 0;
+  const q = S.find || '';
   return (tokens || []).map(t => {
-    if (t.k === 't') return esc(t.v).replace(/\n/g, '<br>');
+    if (t.k === 't') return hi(t.v, q).replace(/\n/g, '<br>');
     if (t.k === 'i') {
       const w = t.img.w ? ` width="${t.img.w}"` : '';
       return `<img src="/assets/${docId}/${encodeURIComponent(t.img.file)}"${w} loading="lazy" alt="">`;
@@ -1003,7 +1089,7 @@ function tokHtml(tokens, docId, am) {
       const a = am[t.op] || {};
       const cls = TYPE_CLS[t.type] || 'expr';
       const st = a.status === 'accepted' ? ' acc' : a.status === 'rejected' ? ' rej' : '';
-      return `<span class="mk t-${cls}${st}" data-op="${t.op}" title="${esc(a.reason || '')}">${esc(t.v)}</span>`;
+      return `<span class="mk t-${cls}${st}" data-op="${t.op}" title="${esc(a.reason || '')}">${hi(t.v, q)}</span>`;
     }
     if (t.k === 'anchor') {
       n++;
@@ -1014,10 +1100,20 @@ function tokHtml(tokens, docId, am) {
     }
     if (t.k === 'ins') {
       const cls = TYPE_CLS[t.type] || 'expr';
-      return `<span class="ins" data-op="${t.op}" style="background:${TYPE_COLOR[cls]}22;border-bottom-color:${TYPE_COLOR[cls]}" title="新增内容">${esc(t.v)}</span>`;
+      return `<span class="ins" data-op="${t.op}" style="background:${TYPE_COLOR[cls]}22;border-bottom-color:${TYPE_COLOR[cls]}" title="新增内容">${hi(t.v, q)}</span>`;
     }
     return '';
   }).join('');
+}
+
+/* 页内查找高亮：先转义再加 mark，避免把标签本身也匹配掉 */
+function hi(text, q) {
+  const e = esc(text);
+  if (!q) return e;
+  const eq = esc(q);
+  if (!eq) return e;
+  const re = new RegExp(eq.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  return e.replace(re, m => `<mark class="find-hit">${m}</mark>`);
 }
 
 function blockHtml(b, docId, am) {
@@ -1113,6 +1209,7 @@ function renderDoc() {
   }
   renderToc();
   wrap.scrollTop = S.scrollMem[S.view] || 0;
+  applyPaperTheme();
 }
 
 /* ────────────────────────── 内容归纳视图 ────────────────────────── */
@@ -1329,6 +1426,33 @@ function annCardHtml(a, idxOf) {
   </div>`;
 }
 
+/* 页内查找：计数与上下跳转 */
+function updateFindCount() {
+  const el = $('#findCount');
+  if (!el) return;
+  if (!S.find) { el.textContent = ''; return; }
+  const hits = $$('.find-hit');
+  el.textContent = hits.length ? `${Math.min(S.findIdx + 1, hits.length)}/${hits.length}` : '无匹配';
+  hits.forEach((h, i) => h.classList.toggle('cur', i === S.findIdx));
+}
+
+function stepFind(d) {
+  const hits = $$('.find-hit');
+  if (!hits.length) return;
+  S.findIdx = (S.findIdx + d + hits.length) % hits.length;
+  updateFindCount();
+  const el = hits[S.findIdx];
+  if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+/* 纸张主题：白 / 米黄 / 夜间 */
+function applyPaperTheme() {
+  const p = $('#paper');
+  const t = PAPER_THEMES[S.paperTheme] || PAPER_THEMES[0];
+  if (p) p.className = 'paper' + (t.key ? ' paper-' + t.key : '');
+  try { localStorage.setItem('nr.paperTheme', String(S.paperTheme)); } catch (e) {}
+}
+
 /* 段落纯文本（右键复制用） */
 function tokText(tokens) {
   return (tokens || []).map(t => (t.k === 'i' ? '［图片］' : (t.v || ''))).join('');
@@ -1354,6 +1478,20 @@ function openNoteDialog(bid) {
   setTimeout(() => $('#noteText').focus(), 60);
 }
 
+/* 取舍进度自动保存：连续点击时防抖，避免每次点都写盘 */
+let _saveTimer = null;
+
+function scheduleSave() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(async () => {
+    if (!S.p || !S.p.doc || S.busy) return;
+    try {
+      const r = await window.pywebview.api.save_progress();
+      if (r && r.ok) S.savedAt = Date.now();
+    } catch (e) { /* 自动保存失败不打断用户操作 */ }
+  }, 1200);
+}
+
 /* 撤销：只回退批注状态，不影响原文 */
 async function undoLast() {
   const u = (S.undo || []).pop();
@@ -1362,6 +1500,7 @@ async function undoLast() {
   if (r && r.ok === false) return toast(r.error || '撤销失败', 'err');
   S.p = r;
   renderAll();
+  scheduleSave();
   toast('已撤销上一步', 'ok');
 }
 
@@ -1387,6 +1526,7 @@ function editAnn(id) {
     if (r.ok === false) return toast(r.error || '保存失败', 'err');
     S.p = r;
     renderAll();
+    scheduleSave();
     toast('替换文本已更新', 'ok');
   };
   ta.onkeydown = e => {
@@ -1453,6 +1593,7 @@ async function setStatus(id, status) {
     if (S.undo.length > 60) S.undo.shift();
   }
   renderAll();
+  scheduleSave();
   const a = r.anns.find(x => x.id === id);
   if (a) {
     toast(`${a.type} · ${status === 'accepted' ? '已保留' : status === 'rejected' ? '已丢弃' : '已重置'}`,
@@ -1468,6 +1609,7 @@ async function bulk(action) {
   if (r && r.ok === false) return toast(r.error || '操作失败', 'err');
   S.p = r;
   renderAll();
+  scheduleSave();
   const n = r.affected || 0;
   toast(`${scope === 'all' ? '全部' : scope} · ${action === 'accept' ? '已保留' : '已撤销'} ${n} 条`,
     action === 'accept' ? 'ok' : '');

@@ -2234,5 +2234,79 @@ class TestIncremental(unittest.TestCase):
         self.assertEqual(out[0]["severity"], "high", "高优先级排前面")
 
 
+# ══════════════════════════════════════════════════════ 场景与进度保存
+class TestScenarioAndProgress(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_sc2_")
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.src = os.path.join(self.tmp, "n.txt")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("标题\n\n第一句。第二句。\n")
+        self.api.load(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_scenario_list_exposed(self):
+        r = self.api.boot()
+        keys = [s["key"] for s in r["scenarios"]]
+        self.assertIn("general", keys)
+        self.assertIn("paper", keys)
+        self.assertEqual(r["reviewScenario"], "general")
+
+    def test_set_scenario(self):
+        r = self.api.set_review_opts(scenario="paper")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["reviewScenario"], "paper")
+
+    def test_bad_scenario_rejected(self):
+        self.assertFalse(self.api.set_review_opts(scenario="nope")["ok"])
+
+    def test_scenario_focus_in_prompt(self):
+        doc = {"title": "t", "blocks": index([para(txt("甲。"))])}
+        m = MockLLM([])
+        pipeline.review_document(doc, m, scenario="meeting")
+        self.assertIn("会议记录", m.calls[0]["system"])
+        self.assertIn("行动项", m.calls[0]["system"])
+
+    def test_general_scenario_adds_nothing(self):
+        doc = {"title": "t", "blocks": index([para(txt("甲。"))])}
+        m = MockLLM([])
+        pipeline.review_document(doc, m, scenario="general")
+        self.assertNotIn("笔记类型侧重", m.calls[0]["system"])
+
+    def test_save_progress_writes_status(self):
+        self.api.anns = [{"id": "a1", "block_id": "b1", "op": "comment",
+                          "type": "结构建议", "target": "", "replacement": "",
+                          "reason": "建议分节", "severity": "low",
+                          "status": "pending", "anchor": None, "sid": None}]
+        e = self.api._save_history(1.0)
+        self.api.anns[0]["status"] = "accepted"
+        r = self.api.save_progress()
+        self.assertTrue(r["ok"], r.get("error"))
+        snap = self.api.history.read(self.src, e["id"])
+        self.assertEqual(snap["anns"][0]["status"], "accepted")
+        self.assertIn("progress_ts", snap)
+
+    def test_save_progress_without_history(self):
+        self.api.history_current = None
+        r = self.api.save_progress()
+        self.assertFalse(r["ok"])
+
+    def test_update_snapshot_missing(self):
+        self.assertFalse(self.api.history.update_snapshot(self.src, "nope", {}))
+
+    def test_update_snapshot_refreshes_meta_counts(self):
+        e = self.api._save_history(1.0)
+        snap = self.api.history.read(self.src, e["id"])
+        snap["anns"] = [{"id": "x"}]
+        self.assertTrue(self.api.history.update_snapshot(self.src, e["id"], snap))
+        ents = self.api.history.entries(self.src)
+        self.assertEqual(ents[0]["anns"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

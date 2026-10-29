@@ -188,6 +188,22 @@ class HistoryStore:
             "note": snap.get("note") or "",
         }
 
+    def update_snapshot(self, path: str, entry_id: str, snapshot: dict) -> bool:
+        """原地更新一条已存在的快照（用于保存取舍进度）。"""
+        if not os.path.exists(self.snap_path(path, entry_id)):
+            return False
+        snap = dict(snapshot)
+        snap["id"] = entry_id
+        _atomic_write_json(self.snap_path(path, entry_id), snap)
+        m = self.meta(path)
+        for i, e in enumerate(m.get("entries", [])):
+            if e.get("id") == entry_id:
+                m["entries"][i] = self._entry_from_snapshot(snap, entry_id)
+                break
+        _atomic_write_json(self.meta_path(path), m)
+        self._sum_cache = None
+        return True
+
     def set_note(self, path: str, entry_id: str, note: str) -> bool:
         """给某次审查加一句备注（"改完错别字后的版本"）。"""
         snap = self.read(path, entry_id)

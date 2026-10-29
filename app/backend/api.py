@@ -118,6 +118,7 @@ class Api:
             "history_keep": 8,
             "history_keep_days": 0,
             "review_level": "normal",
+            "review_scenario": "general",
             "glossary": [],
             "relayout": dict(RELAYOUT_DEFAULTS),
             "recent": [],
@@ -244,6 +245,9 @@ class Api:
             "base": self.cfg.get("base", ""),
             "relayoutOpts": self.cfg.get("relayout", {}),
             "reviewLevel": self.cfg.get("review_level", "normal"),
+            "reviewScenario": self.cfg.get("review_scenario", "general"),
+            "scenarios": [{"key": k, "label": v[0]}
+                          for k, v in pipeline.REVIEW_SCENARIOS.items()],
             "glossary": self.cfg.get("glossary", []),
             "recent": self.cfg.get("recent", [])[:8],
             "pending": self.pending_path,
@@ -738,6 +742,29 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def save_progress(self) -> dict:
+        """把当前的取舍进度写回本次历史快照。
+
+        逐条保留/丢弃几十条批注要花好几分钟，一旦崩溃或误关窗口，
+        这些判断就全没了 —— 前端在每次改动后防抖调用这里。
+        """
+        if not self.doc:
+            return {"ok": False, "error": "请先导入文档"}
+        cur = self.history_current or {}
+        eid = cur.get("id")
+        if not eid:
+            return {"ok": False, "error": "当前没有可写的审查记录"}
+        snap = self.history.read(self.doc["path"], eid)
+        if not isinstance(snap, dict):
+            return {"ok": False, "error": "这条历史记录已丢失"}
+        snap["anns"] = self.anns
+        snap["summary"] = self.summary
+        snap["image_report"] = self.image_report
+        snap["progress_ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        ok = self.history.update_snapshot(self.doc["path"], eid, snap)
+        return {"ok": bool(ok), "id": eid,
+                "error": "" if ok else "写入失败，请检查历史目录权限"}
+
     def history_set_note(self, entry_id: str, note: str) -> dict:
         """给一次审查加备注，方便日后分辨「哪次是我改完之后的」。"""
         if not self.doc:
@@ -1041,7 +1068,8 @@ class Api:
                 level=str(self.cfg.get("review_level") or "normal"),
                 glossary=self.cfg.get("glossary") or [],
                 should_stop=self._cancel.is_set,
-                only_ids=only_ids)
+                only_ids=only_ids,
+                scenario=str(self.cfg.get("review_scenario") or "general"))
             if incremental and reused:
                 self.anns = review.finalize(reused + new_anns)
             else:
@@ -1216,8 +1244,13 @@ class Api:
         return self._payload(extra={"affected": len(targets)})
 
     # ------------------------------------------------------------ 重排
-    def set_review_opts(self, level: str = "", glossary=None) -> dict:
-        """审校力度与术语白名单。level 留空表示不改。"""
+    def set_review_opts(self, level: str = "", glossary=None,
+                        scenario: str = "") -> dict:
+        """审校力度、术语白名单与笔记场景。留空表示不改。"""
+        if scenario:
+            if scenario not in pipeline.REVIEW_SCENARIOS:
+                return {"ok": False, "error": f"未知的笔记场景：{scenario}"}
+            self.cfg["review_scenario"] = scenario
         if level:
             if level not in ("light", "normal", "strict"):
                 return {"ok": False, "error": f"未知的审校力度：{level}"}
@@ -1233,6 +1266,7 @@ class Api:
             self.cfg["glossary"] = terms[:200]
         self._save_cfg()
         return {"ok": True, "reviewLevel": self.cfg.get("review_level", "normal"),
+                "reviewScenario": self.cfg.get("review_scenario", "general"),
                 "glossary": self.cfg.get("glossary", [])}
 
     def _rebuild_relayout(self):
