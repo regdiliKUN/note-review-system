@@ -161,6 +161,8 @@ function fillSettings(boot) {
   if (S._renderScenarios) S._renderScenarios(boot.scenarios || []);
   $$('#levelSeg button').forEach(b => b.classList.toggle('active', b.dataset.l === S.level));
   if ($('#inpGlossary')) $('#inpGlossary').value = (boot.glossary || []).join('、');
+  if ($('#selConcurrency')) $('#selConcurrency').value = String(boot.reviewConcurrency || 1);
+  if ($('#selMaxPerBlock')) $('#selMaxPerBlock').value = String(boot.reviewMaxPerBlock || 0);
   if ($('#levelHint')) {
     $('#levelHint').textContent = {
       light: '轻：只挑错别字与事实错误，措辞风格差异一律不提。适合已经很成熟的稿子。',
@@ -728,7 +730,9 @@ function wire() {
     // 审校力度与术语白名单
     if ($('#inpGlossary')) {
       await window.pywebview.api.set_review_opts(
-        S.level || 'normal', $('#inpGlossary').value, S.scenario || 'general');
+        S.level || 'normal', $('#inpGlossary').value, S.scenario || 'general',
+        $('#selConcurrency') ? parseInt($('#selConcurrency').value, 10) : -1,
+        $('#selMaxPerBlock') ? parseInt($('#selMaxPerBlock').value, 10) : -1);
     }
     const opts = {};
     $$('.checks input').forEach(c => opts[c.dataset.opt] = c.checked);

@@ -1159,8 +1159,82 @@ def _cell_at(row: List[Dict[str, Any]], target: int):
     return None
 
 
+# ---------------------------------------------------------------- Word 原生批注
+COMMENTS_CT = ("application/vnd.openxmlformats-officedocument"
+               ".wordprocessingml.comments+xml")
+COMMENTS_RT = ("http://schemas.openxmlformats.org/officeDocument/2006/"
+               "relationships/comments")
+_SEV_CN = {"high": "高", "medium": "中", "low": "低"}
+
+
+def _comment_paragraphs(a: Dict[str, Any]) -> List[str]:
+    """把一条批注拆成 Word 批注框里的几行文字。"""
+    head = f"{a.get('type') or '建议'}　严重度：{_SEV_CN.get(a.get('severity'), '中')}"
+    out = [head]
+    op = a.get("op")
+    if op == "insert_after" and a.get("replacement"):
+        out.append("建议在此处补充：" + str(a["replacement"]))
+    elif a.get("replacement") and a.get("target"):
+        out.append("建议改为：" + str(a["replacement"]))
+    if a.get("reason"):
+        out.append("理由：" + str(a["reason"]))
+    return [p for p in out if p]
+
+
+def _comment_el(tag: str, cid: int):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    if tag == "start":
+        return parse_xml(f'<w:commentRangeStart {nsdecls("w")} w:id="{cid}"/>')
+    if tag == "end":
+        return parse_xml(f'<w:commentRangeEnd {nsdecls("w")} w:id="{cid}"/>')
+    return parse_xml(
+        f'<w:r {nsdecls("w")}><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>'
+        f'<w:commentReference w:id="{cid}"/></w:r>')
+
+
+def _add_comments_part(doc, items: List[tuple], author: str = "笔记审查") -> None:
+    """新建 word/comments.xml 并挂到 document.xml 的关系上。"""
+    import time
+    from xml.sax.saxutils import escape as xesc
+
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
+    from docx.oxml.ns import nsdecls
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    body = []
+    for cid, a in items:
+        paras = "".join(
+            "<w:p><w:r><w:t xml:space=\"preserve\">" + xesc(p) + "</w:t></w:r></w:p>"
+            for p in _comment_paragraphs(a))
+        body.append(
+            f'<w:comment w:id="{cid}" w:author="{xesc(author)}" w:initials="NR" '
+            f'w:date="{now}">{paras}</w:comment>')
+    xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           f'<w:comments {nsdecls("w")}>' + "".join(body) + "</w:comments>")
+    part = Part(PackURI("/word/comments.xml"), COMMENTS_CT,
+                xml.encode("utf-8"), doc.part.package)
+    doc.part.relate_to(part, COMMENTS_RT)
+
+
+def _ensure_comment_styles(doc) -> None:
+    from docx.enum.style import WD_STYLE_TYPE
+    for name, kind in (("CommentReference", WD_STYLE_TYPE.CHARACTER),
+                       ("CommentText", WD_STYLE_TYPE.PARAGRAPH)):
+        try:
+            doc.styles[name]
+        except KeyError:
+            try:
+                doc.styles.add_style(name, kind)
+            except Exception:
+                pass
+
+
 def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
-                title: str = "", toc: bool = False):
+                title: str = "", toc: bool = False,
+                anns: List[Dict[str, Any]] | None = None,
+                author: str = "笔记审查"):
     """把 block 模型写成 docx：seg 顺序原样落盘，图片按原位插入。"""
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1199,28 +1273,90 @@ def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
         h = doc.add_heading(title, level=0)
         h.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    def write_segs(par, segs):
-        for s in segs:
+    # ---- 批注：只保留未被丢弃的，按文档顺序编号
+    cids: Dict[str, int] = {}
+    comment_items: List[tuple] = []
+    if anns:
+        _ensure_comment_styles(doc)
+        keep = [a for a in anns if a.get("status") != "rejected"]
+        for i, a in enumerate(keep):
+            cids[a["id"]] = i + 1
+            comment_items.append((i + 1, a))
+    by_block_ann: Dict[str, List[Dict[str, Any]]] = {}
+    for a in (anns or []):
+        if a["id"] in cids:
+            by_block_ann.setdefault(a.get("block_id") or "", []).append(a)
+
+    def add_text_runs(par, text, start_cid=None, end_cid=None):
+        """写一段文字，可在首尾挂上批注范围标记。"""
+        first_run = last_run = None
+        for i, piece in enumerate(_xml_safe(text).split("\n")):
+            if i:
+                last_run = par.add_run()
+                last_run.add_break()
+            if piece:
+                r = par.add_run(piece)
+                if first_run is None:
+                    first_run = r
+                last_run = r
+        if start_cid is not None and first_run is not None:
+            first_run._r.addprevious(_comment_el("start", start_cid))
+        if end_cid is not None and last_run is not None:
+            # addnext 是「插到紧后面」，所以先插引用标记再插结束标记，
+            # 最终顺序才是 run → commentRangeEnd → commentReference
+            last_run._r.addnext(_comment_el("ref", end_cid))
+            last_run._r.addnext(_comment_el("end", end_cid))
+
+    def write_segs(par, segs, block_anns=None):
+        spans: Dict[int, List[tuple]] = {}
+        tail: List[int] = []
+        for a in (block_anns or []):
+            cid = cids.get(a["id"])
+            if not cid:
+                continue
+            anc = a.get("anchor")
+            if not anc:
+                tail.append(cid)
+                continue
+            si, so, ei, eo = anc
+            if ei != si:          # 跨图片的批注只标到片段末尾
+                eo = None
+            spans.setdefault(si, []).append((so, eo, cid))
+
+        for si, s in enumerate(segs):
             if s["t"] == "text":
-                for i, piece in enumerate(_xml_safe(s["v"]).split("\n")):
-                    if i:
-                        par.add_run().add_break()
-                    if piece:
-                        par.add_run(piece)
-            else:
-                p = os.path.join(asset_dir, s["file"])
-                if not os.path.exists(p):
-                    continue
-                kw = {}
-                if s.get("w"):
-                    px = int(s["w"])
-                    # 超过版心宽度时按 6 英寸缩放（.doc 抽出的图是原始像素宽，可能很大）
-                    kw["width"] = Inches(6.0) if px > 560 else Emu(px * 9525)
-                try:
-                    run = par.add_run()
-                    run.add_picture(p, **kw)
-                except Exception:
-                    pass
+                v = s["v"]
+                pos = 0
+                for so, eo, cid in sorted(spans.get(si, []), key=lambda x: x[0]):
+                    end = len(v) if eo is None else min(eo, len(v))
+                    start = max(so, pos)
+                    if start > pos:
+                        add_text_runs(par, v[pos:start])
+                    if end > start:
+                        add_text_runs(par, v[start:end], cid, cid)
+                    pos = max(pos, end)
+                if pos < len(v):
+                    add_text_runs(par, v[pos:])
+                continue
+            p = os.path.join(asset_dir, s["file"])
+            if not os.path.exists(p):
+                continue
+            kw = {}
+            if s.get("w"):
+                px = int(s["w"])
+                # 超过版心宽度时按 6 英寸缩放（.doc 抽出的图是原始像素宽，可能很大）
+                kw["width"] = Inches(6.0) if px > 560 else Emu(px * 9525)
+            try:
+                run = par.add_run()
+                run.add_picture(p, **kw)
+            except Exception:
+                pass
+
+        # 没有具体锚点的批注（结构建议 / 图像提示）挂在段落末尾
+        for cid in tail:
+            par._p.append(_comment_el("start", cid))
+            par._p.append(_comment_el("end", cid))
+            par._p.append(_comment_el("ref", cid))
 
     for b in blocks:
         if b["kind"] == "table":
@@ -1274,10 +1410,13 @@ def export_docx(blocks: List[Dict[str, Any]], asset_dir: str, out_path: str,
             par = doc.add_paragraph()
             if b.get("style", {}).get("code"):
                 par.paragraph_format.left_indent = Inches(0.3)
-        write_segs(par, b.get("segs", []))
+        write_segs(par, b.get("segs", []), by_block_ann.get(b["id"]))
         if b["kind"] == "list":
             depth = int(b.get("style", {}).get("list_level") or 0)
             par.paragraph_format.left_indent = Inches(0.3 + 0.24 * min(depth, 8))
+
+    if comment_items:
+        _add_comments_part(doc, comment_items, author)
 
     doc.save(out_path)
     return out_path

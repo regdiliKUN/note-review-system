@@ -212,9 +212,10 @@ class LLM:
 
     # ------------------------------------------------------------ 生成
     def generate(self, system: str, user: str, json_mode: bool = True,
-                 on_token=None) -> str:
+                 on_token=None, max_tokens: int = 0) -> str:
         fn = self._ollama if self.provider == "ollama" else self._openai
-        return self._with_retry(lambda: fn(system, user, json_mode, on_token))
+        return self._with_retry(
+            lambda: fn(system, user, json_mode, on_token, max_tokens))
 
     def _with_retry(self, call):
         """对临时性网络故障重试；确定性错误（模型不存在、参数错）立即抛出。"""
@@ -323,7 +324,7 @@ class LLM:
         except Exception as e:
             self._raise_vision(e, "视觉模型返回异常")
 
-    def _ollama(self, system, user, json_mode, on_token):
+    def _ollama(self, system, user, json_mode, on_token, max_tokens=0):
         payload = {
             "model": self.model,
             "prompt": user,
@@ -333,7 +334,7 @@ class LLM:
             "options": {
                 "temperature": self.temperature,
                 "num_ctx": self.num_ctx,
-                "num_predict": 4096,
+                "num_predict": int(max_tokens) if max_tokens else 4096,
             },
         }
         if json_mode:
@@ -364,7 +365,7 @@ class LLM:
         except urllib.error.URLError as e:
             raise LLMError(f"连接模型服务失败：{e}") from e
 
-    def _openai(self, system, user, json_mode, on_token):
+    def _openai(self, system, user, json_mode, on_token, max_tokens=0):
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system},
@@ -372,6 +373,8 @@ class LLM:
             "temperature": self.temperature,
             "stream": bool(on_token),
         }
+        if max_tokens:
+            body["max_tokens"] = int(max_tokens)
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         req = urllib.request.Request(

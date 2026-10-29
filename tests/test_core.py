@@ -60,8 +60,8 @@ class MockLLM:
         self.model = "mock"
         self.vision_model = ""
 
-    def generate(self, system, user, json_mode=True, on_token=None):
-        self.calls.append({"system": system, "user": user})
+    def generate(self, system, user, json_mode=True, on_token=None, max_tokens=0):
+        self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         if self.fn is not None:
             return self.fn(system, user)
         if not self.replies:
@@ -2375,6 +2375,244 @@ class TestBulkScope(unittest.TestCase):
         r2 = self.api.bulk("accept", "存疑待核")
         self.assertFalse(r2["ok"])
         self.assertIn("没有批注", r2["error"])
+
+
+class TestReviewThroughput(unittest.TestCase):
+    """并发、失败补偿、每段上限、输出预算。"""
+
+    def _doc(self, n=4, chars=900):
+        blocks = index([para(txt("啊" * chars)) for _ in range(n)])
+        return {"title": "t", "blocks": blocks}
+
+    def _reply(self, bid):
+        return json.dumps({"annotations": [
+            {"block_id": bid, "sid": 0, "op": "replace_sentence", "type": "表达优化",
+             "replacement": "改写后的句子。", "reason": "r"}]}, ensure_ascii=False)
+
+    def test_failed_chunk_records_block_ids(self):
+        doc = self._doc(2)
+        rep = {}
+        pipeline.review_document(doc, MockLLM([llm.LLMError("boom"), "{}"]), report=rep)
+        self.assertEqual(len(rep["failed"]), 1)
+        self.assertTrue(rep["failed"][0]["blocks"], "失败分块必须记下覆盖的段落")
+
+    def test_concurrency_matches_serial(self):
+        """并发与串行必须产出同一批批注（顺序、id、内容一致）。"""
+        def run(conc):
+            doc = self._doc(4)
+            m = MockLLM(fn=lambda s, u: self._reply("b0"))
+            rep = {}
+            anns = pipeline.review_document(doc, m, report=rep, concurrency=conc)
+            return [(a["id"], a["block_id"], a["replacement"]) for a in anns], rep["chunks"]
+
+        a, n1 = run(1)
+        b, n2 = run(3)
+        self.assertEqual(n1, n2)
+        self.assertEqual(a, b)
+
+    def test_concurrency_isolates_errors(self):
+        doc = self._doc(3)
+        calls = {"n": 0}
+
+        def fn(s, u):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise llm.LLMError("boom")
+            return self._reply("b0")
+
+        rep = {}
+        anns = pipeline.review_document(doc, MockLLM(fn=fn), report=rep, concurrency=3)
+        self.assertEqual(len(rep["failed"]), 1)
+        self.assertGreater(len(anns), 0, "其它分块的结果必须保住")
+
+    def test_max_per_block_caps(self):
+        anns = [{"id": f"a{i}", "block_id": "b0", "op": "comment", "type": "表达优化",
+                 "target": "", "replacement": "", "reason": "r",
+                 "severity": ["high", "medium", "low"][i % 3], "status": "pending",
+                 "anchor": None, "sid": None} for i in range(10)]
+        out = review.cap_per_block(anns, 4)
+        self.assertEqual(len(out), 4)
+        self.assertEqual(sum(1 for a in out if a["severity"] == "high"), 4,
+                         "应当优先保留高严重度")
+
+    def test_max_per_block_zero_means_unlimited(self):
+        anns = [{"id": f"a{i}", "block_id": "b0", "op": "comment", "type": "表达优化",
+                 "target": "", "replacement": "", "reason": "r", "severity": "low",
+                 "status": "pending", "anchor": None, "sid": None} for i in range(10)]
+        self.assertEqual(len(review.cap_per_block(anns, 0)), 10)
+
+    def test_output_budget_scales_with_chunk(self):
+        small = index([para(txt("短。"))])
+        big = index([para(txt("长句内容。" * 400))])
+        b1 = pipeline._output_budget(pipeline._pieces(small))
+        b2 = pipeline._output_budget(pipeline._pieces(big))
+        self.assertGreaterEqual(b1, 1024)
+        self.assertGreater(b2, b1)
+        self.assertLessEqual(b2, 8192)
+
+    def test_budget_passed_to_model(self):
+        doc = self._doc(1)
+        m = MockLLM([self._reply("b0")])
+        pipeline.review_document(doc, m)
+        self.assertGreater(m.calls[0]["max_tokens"], 0)
+
+    def test_cancel_marks_unreviewed_chunks(self):
+        doc = self._doc(4)
+        state = {"n": 0}
+
+        def stop():
+            state["n"] += 1
+            return state["n"] > 1
+
+        rep = {}
+        pipeline.review_document(doc, MockLLM([self._reply("b0")] * 4),
+                                 report=rep, should_stop=stop)
+        self.assertTrue(rep["canceled"])
+        self.assertTrue(rep["failed"], "取消后未审查的分块要标记出来")
+
+
+class TestIncrementalFailedCompensation(unittest.TestCase):
+    """上次失败的段落，增量审查必须强制重审。"""
+
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_inc_")
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        os.makedirs(os.path.join(self.tmp, "assets"), exist_ok=True)
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.src = os.path.join(self.tmp, "n.txt")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("第一段内容。\n\n第二段内容。\n\n第三段内容。\n")
+        self.api.load(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_failed_blocks_are_not_reused(self):
+        self.api.anns = []
+        self.api._last_failed_blocks = [self.api.doc["blocks"][0]["id"]]
+        self.api._save_history(1.0)
+        self.api._last_failed_blocks = []
+        seen, _ = self.api._prev_reuse()
+        first_hash = __import__("backend.api", fromlist=["_text_hash"])._text_hash(
+            self.api.doc["blocks"][0])
+        self.assertNotIn(first_hash, seen, "失败段落的指纹不能进可复用集合")
+        r = self.api.can_incremental()
+        self.assertGreaterEqual(r["changed"], 1)
+
+
+class TestDocxComments(unittest.TestCase):
+    """导出「Word 批注版」：正文保持原样，建议以 Word 原生批注呈现。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nr_cmt_")
+        self.asset = self.tmp
+        from PIL import Image
+        Image.new("RGB", (40, 30), (7, 7, 7)).save(os.path.join(self.tmp, "a.png"))
+        self.blocks = index([
+            heading("标题"),
+            para(txt("第一句。第二句。")),
+            para(txt("带图"), img(), txt("结尾。")),
+        ])
+        self.anns = [
+            {"id": "a1", "block_id": "b1", "op": "replace_sentence", "type": "表达优化",
+             "target": "第一句。", "replacement": "改后第一句。", "reason": "更通顺",
+             "severity": "high", "status": "pending", "anchor": [0, 0, 0, 4], "sid": 0},
+            {"id": "a2", "block_id": "b2", "op": "comment", "type": "结构建议",
+             "target": "", "replacement": "", "reason": "建议拆段", "severity": "low",
+             "status": "accepted", "anchor": None, "sid": None},
+            {"id": "a3", "block_id": "b1", "op": "comment", "type": "错别字",
+             "target": "", "replacement": "", "reason": "这条已被丢弃", "severity": "low",
+             "status": "rejected", "anchor": None, "sid": None},
+        ]
+        self.out = os.path.join(self.tmp, "o.docx")
+        docmodel.export_docx(self.blocks, self.asset, self.out, "标题", anns=self.anns)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _zip(self):
+        import zipfile
+        return zipfile.ZipFile(self.out)
+
+    def test_comments_part_exists(self):
+        names = self._zip().namelist()
+        self.assertIn("word/comments.xml", names)
+        self.assertIn("comments+xml", self._zip().read("[Content_Types].xml").decode())
+        rels = self._zip().read("word/_rels/document.xml.rels").decode()
+        self.assertIn("comments", rels)
+
+    def test_rejected_excluded(self):
+        c = self._zip().read("word/comments.xml").decode()
+        self.assertEqual(c.count("<w:comment "), 2)
+        self.assertNotIn("这条已被丢弃", c)
+
+    def test_comment_text_contains_reason(self):
+        c = self._zip().read("word/comments.xml").decode()
+        self.assertIn("更通顺", c)
+        self.assertIn("改后第一句。", c)
+
+    def test_range_markers_balanced(self):
+        d = self._zip().read("word/document.xml").decode()
+        self.assertEqual(d.count("commentRangeStart"), 2)
+        self.assertEqual(d.count("commentRangeEnd"), 2)
+        self.assertEqual(d.count("commentReference"), 2)
+
+    def test_body_text_unchanged(self):
+        import re
+        d = self._zip().read("word/document.xml").decode()
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", d))
+        self.assertIn("第一句。第二句。", text, "批注版正文必须是原文，不能预先应用改动")
+
+    def test_reopen_by_python_docx(self):
+        from docx import Document
+        self.assertTrue(Document(self.out).paragraphs)
+
+    def test_no_anns_no_comments_part(self):
+        p = os.path.join(self.tmp, "plain.docx")
+        docmodel.export_docx(self.blocks, self.asset, p, "标题")
+        import zipfile
+        self.assertNotIn("word/comments.xml", zipfile.ZipFile(p).namelist())
+
+
+class TestCommentedExportApi(unittest.TestCase):
+    def setUp(self):
+        from backend.api import Api
+        self.tmp = tempfile.mkdtemp(prefix="nr_capi_")
+        os.makedirs(os.path.join(self.tmp, "assets"), exist_ok=True)
+        self.api = Api(workdir=self.tmp, get_window=lambda: None,
+                       asset_root=os.path.join(self.tmp, "assets"))
+        self.api.set_history_dir(os.path.join(self.tmp, "hist"))
+        self.src = os.path.join(self.tmp, "n.txt")
+        with open(self.src, "w", encoding="utf-8") as f:
+            f.write("标题行\n\n第一句。第二句。\n")
+        self.api.load(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_requires_annotations(self):
+        r = self.api.export("commented", "docx", os.path.join(self.tmp, "x.docx"))
+        self.assertFalse(r["ok"])
+        self.assertIn("批注", r["error"])
+
+    def test_exports_with_annotations(self):
+        bid = self.api.doc["blocks"][-1]["id"]
+        self.api.add_manual_note(bid, "手工批注")
+        r = self.api.export("commented", "docx", os.path.join(self.tmp, "x.docx"))
+        self.assertTrue(r["ok"])
+        import zipfile
+        self.assertIn("word/comments.xml", zipfile.ZipFile(r["path"]).namelist())
+
+    def test_rejected_note_not_exported(self):
+        bid = self.api.doc["blocks"][-1]["id"]
+        self.api.add_manual_note(bid, "会被丢弃的批注")
+        aid = self.api.anns[-1]["id"]
+        self.api.set_status(aid, "rejected")
+        r = self.api.export("commented", "docx", os.path.join(self.tmp, "y.docx"))
+        self.assertFalse(r["ok"])
+        self.assertIn("丢弃", r["error"])
 
 
 if __name__ == "__main__":

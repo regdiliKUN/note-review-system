@@ -247,7 +247,8 @@ def _render_chunk(pieces: List[Dict[str, Any]]) -> str:
     return "\n\n".join(out)
 
 
-def _ask_json(llm: LLM, system: str, user: str, attempts: int = 2) -> Dict[str, Any]:
+def _ask_json(llm: LLM, system: str, user: str, attempts: int = 2,
+              max_tokens: int = 0) -> Dict[str, Any]:
     """要求模型返回 JSON；解析不出来时，追加一句纠正再问一次。
 
     小模型经常第一轮输出「好的，我来分析……」这类前言，
@@ -255,7 +256,7 @@ def _ask_json(llm: LLM, system: str, user: str, attempts: int = 2) -> Dict[str, 
     """
     prompt = user
     for i in range(max(1, attempts)):
-        raw = llm.generate(system, prompt, json_mode=True)
+        raw = llm.generate(system, prompt, json_mode=True, max_tokens=max_tokens)
         data = extract_json(raw)
         if data:
             return data
@@ -265,6 +266,54 @@ def _ask_json(llm: LLM, system: str, user: str, attempts: int = 2) -> Dict[str, 
     return {}
 
 
+def _chunk_tails(chunks: List[List[Dict]]) -> List[str]:
+    """预先算出每个分块的「紧接上文」尾句。
+
+    这件事不依赖模型输出，所以可以一次算完 —— 有了它，分块才能并行送审，
+    而且并发与串行得到的提示词完全一致（结果可复现）。
+    """
+    tails: List[str] = []
+    prev = ""
+    for chunk in chunks:
+        tails.append(prev)
+        last = chunk[-1] if chunk else None
+        if last and last["b"]["kind"] != "table":
+            sents = block_sentences(last["b"])
+            sel = sents[max(0, last["hi"] - 2):last["hi"]]
+            prev = "".join(s["text"] for s in sel).strip()[:200]
+        elif last:
+            prev = _table_plain(last["b"])[-120:].strip()
+    return tails
+
+
+def _chunk_prompt(doc_ctx: str, i: int, total: int, chunk: List[Dict], tail: str) -> str:
+    return (
+        f"{doc_ctx}\n\n"
+        f"以下是笔记的第 {i + 1}/{total} 部分（[b3｜正文] 是段落编号，"
+        f"行首数字是句号编号 sid）：\n"
+        + (f"\n【紧接上文】{tail}\n" if tail else "\n")
+        + f"\n{_render_chunk(chunk)}\n\n"
+        f"请审校以上内容，按格式输出 JSON。"
+    )
+
+
+def _output_budget(chunk: List[Dict]) -> int:
+    """按本块字数估一个输出上限。
+
+    小模型默认 num_predict=4096，遇到长块时 JSON 会被硬截断，
+    后半块的批注整片消失；给足预算能让「截断」这件事基本不再发生。
+    """
+    n = 0
+    for p in chunk:
+        b = p["b"]
+        if b["kind"] == "table":
+            n += len(_table_plain(b))
+        else:
+            sents = block_sentences(b)
+            n += sum(len(s["text"]) for s in sents[p["lo"]:p["hi"]])
+    return int(max(1024, min(8192, n * 1.6)))
+
+
 def review_document(doc: Dict[str, Any], llm: LLM,
                     on_progress: Callable[[str, float], None] | None = None,
                     report: Dict[str, Any] | None = None,
@@ -272,13 +321,16 @@ def review_document(doc: Dict[str, Any], llm: LLM,
                     glossary: list | None = None,
                     should_stop: Callable[[], bool] | None = None,
                     only_ids: set | None = None,
-                    scenario: str = "general"
+                    scenario: str = "general",
+                    concurrency: int = 1,
+                    max_per_block: int = 0,
                     ) -> List[Dict[str, Any]]:
     """逐块送审。单块失败不会拖垮整篇 —— 失败的分块会记进 report。
 
     should_stop 返回 True 时在分块之间停下（用户点了取消），
     已完成的批注全部保留，不会白跑。
     only_ids 非空时只审这些段落（增量审查用），其余段落直接跳过。
+    concurrency > 1 时并行送审（本机 Ollama 设了 OLLAMA_NUM_PARALLEL 才有意义）。
     """
     blocks = doc["blocks"]
     if only_ids is not None:
@@ -300,27 +352,74 @@ def review_document(doc: Dict[str, Any], llm: LLM,
     canceled = False
     system = _system_review(level, glossary, scenario)
     doc_ctx = _doc_context(doc)
-    prev_tail = ""
+    tails = _chunk_tails(chunks)
+    workers = max(1, min(int(concurrency or 1), total))
 
-    for i, chunk in enumerate(chunks):
-        if should_stop is not None and should_stop():
-            canceled = True
-            break
-        if on_progress:
-            on_progress(f"正在审查第 {i + 1}/{total} 段…", i / total * 0.9)
-        user = (
-            f"{doc_ctx}\n\n"
-            f"以下是笔记的第 {i + 1}/{total} 部分（[b3｜正文] 是段落编号，"
-            f"行首数字是句号编号 sid）：\n"
-            + (f"\n【紧接上文】{prev_tail}\n" if prev_tail else "\n")
-            + f"\n{_render_chunk(chunk)}\n\n"
-            f"请审校以上内容，按格式输出 JSON。"
-        )
-        try:
-            data = _ask_json(llm, system, user)
-        except LLMError as e:
-            # 一块失败不该让整篇白跑：记下来，继续下一块
-            failed.append({"chunk": i + 1, "error": str(e)})
+    def work(i: int) -> Dict[str, Any]:
+        return _ask_json(llm, system,
+                         _chunk_prompt(doc_ctx, i, total, chunks[i], tails[i]),
+                         max_tokens=_output_budget(chunks[i]))
+
+    # ---- 送审：串行或并发，结果一律按分块顺序回收
+    payloads: List[Any] = [None] * len(chunks)
+    errors: Dict[int, str] = {}
+    if workers == 1:
+        for i in range(len(chunks)):
+            if should_stop is not None and should_stop():
+                canceled = True
+                break
+            if on_progress:
+                on_progress(f"正在审查第 {i + 1}/{total} 段…", i / total * 0.9)
+            try:
+                payloads[i] = work(i)
+            except LLMError as e:
+                errors[i] = str(e)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        done = 0
+        stop = False
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {}
+            for i in range(len(chunks)):
+                if should_stop is not None and should_stop():
+                    canceled = True
+                    stop = True
+                    break
+                futs[ex.submit(work, i)] = i
+            for fut in as_completed(futs):
+                i = futs[fut]
+                try:
+                    payloads[i] = fut.result()
+                except LLMError as e:
+                    errors[i] = str(e)
+                except Exception as e:      # 线程内异常也不能让整篇崩掉
+                    errors[i] = f"{type(e).__name__}: {e}"
+                done += 1
+                if on_progress:
+                    on_progress(f"正在审查第 {done}/{len(futs)} 段…",
+                                done / max(1, len(futs)) * 0.9)
+            if stop:
+                for f in futs:
+                    f.cancel()
+
+    # ---- 按顺序解析，保证批注编号稳定
+    for i in range(len(chunks)):
+        if i in errors:
+            failed.append({
+                "chunk": i + 1, "error": errors[i],
+                # 记下这一块覆盖的段落：下次增量审查要强制重审它们
+                "blocks": sorted({p["b"]["id"] for p in chunks[i]}),
+            })
+            continue
+        data = payloads[i]
+        if data is None:
+            # 取消导致没跑到 / 没来得及完成的分块，同样算「未审」，
+            # 让下一次增量审查把它们补上，而不是静默漏掉。
+            if canceled:
+                failed.append({
+                    "chunk": i + 1, "error": "已取消，本段未审查",
+                    "blocks": sorted({p["b"]["id"] for p in chunks[i]}),
+                })
             continue
         items = data.get("annotations") or data.get("edits") or []
         if isinstance(items, dict):
@@ -347,23 +446,18 @@ def review_document(doc: Dict[str, Any], llm: LLM,
             got += 1
         if not got and not items:
             empty += 1
-        # 记录本块末尾两句，作为下一块的「紧接上文」
-        last = chunk[-1]
-        if last["b"]["kind"] != "table":
-            sents = block_sentences(last["b"])
-            tail = sents[max(0, last["hi"] - 2):last["hi"]]
-            prev_tail = "".join(s["text"] for s in tail).strip()[:200]
 
     # 同一句的冲突改写只留一条，再按严重度排序
     before = len(anns)
-    anns = review_finalize(anns)
+    anns = review_finalize(anns, max_per_block=max_per_block)
     conflicts = before - len(anns)
     if report is not None:
         report.update({"chunks": len(chunks), "failed": failed, "empty": empty,
                        "annotations": len(anns), "dropped": dropped,
                        "conflicts": conflicts, "level": level,
-                       "canceled": canceled,
-                       "done_chunks": total if not canceled else i})
+                       "canceled": canceled, "concurrency": workers,
+                       "done_chunks": total if not canceled else
+                       sum(1 for x in payloads if x is not None)})
     if on_progress:
         on_progress("已取消，保留已完成的部分" if canceled else "正在生成整体归纳…",
                     0.92 if not canceled else 0.5)

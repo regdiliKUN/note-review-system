@@ -269,6 +269,7 @@
           <button data-fmt="docx" data-kind="revised">Word · 修正后版本</button>
           <button data-fmt="docx" data-kind="relayout">Word · 重排版版本</button>
           <button data-fmt="docx" data-kind="original">Word · 原版笔记</button>
+          <button data-fmt="docx" data-kind="commented">Word · 批注版（原生批注）</button>
           <div class="menu-sep"></div>
           <button data-fmt="html" data-kind="revised">网页 · 修正后版本</button>
           <button data-fmt="html" data-kind="relayout">网页 · 重排版版本</button>
@@ -363,6 +364,24 @@
         <textarea id="inpGlossary" rows="2"
                   placeholder="用顿号、逗号或换行分隔，例如：DynaMesh、SubTool、UV"></textarea>
         <div class="hint">专有名词、自造缩写、团队内部叫法写在这里，模型不会去「纠正」它们。</div>
+      </div>
+      <div class="field">
+        <label>审查吞吐</label>
+        <div class="asr-row">
+          <select id="selConcurrency">
+            <option value="1">并发 1 块（最稳，显存占用最低）</option>
+            <option value="2">并发 2 块</option>
+            <option value="3">并发 3 块（需要 Ollama 并行）</option>
+            <option value="4">并发 4 块</option>
+          </select>
+          <select id="selMaxPerBlock">
+            <option value="0">每段批注不限</option>
+            <option value="3">每段最多 3 条</option>
+            <option value="6">每段最多 6 条</option>
+            <option value="10">每段最多 10 条</option>
+          </select>
+        </div>
+        <div class="hint">并发只在服务端支持并行时才会变快（Ollama 可设 <code>OLLAMA_NUM_PARALLEL=3</code>）；不确定就用 1。每段上限用来压掉「同一段挑出十几条小事」的噪声。</div>
       </div>
       <div class="field">
         <label>环境自检</label>

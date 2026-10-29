@@ -166,3 +166,13 @@
 | 159 | tests | 新增批量范围用例（严重度/待处理/类型/空目标） | 四种范围组合都有回归保护 |
 | 160 | docs | CHANGELOG 按版本汇总 160 轮优化 | 从 v1.2 升级的人能一眼看懂值不值得升 |
 | 161 | docmodel._guess_title | 标题优先取文档开头几行，而不是「第一个一级标题」 | 修掉 infer_headings 把「一、基础操作」提成一级标题后，整篇标题变成小节名 |
+| 162 | pipeline.review_document | 失败分块记录它覆盖的 block id | 为「只补审失败段」提供定位依据，而不是只知道「第 3 段失败了」 |
+| 163 | api._prev_reuse | 历史快照存 `failed_blocks`，增量审查把它们的指纹从可复用集合里摘掉 | **修真实缺陷**：以前某段审查失败后，因文字未改，增量审查会永远跳过它，结果静默缺角 |
+| 164 | pipeline | 用户取消时，未跑完的分块同样记入 failed | 中断后再次增量审查能把剩下的一次补齐 |
+| 165 | pipeline._chunk_tails | 「紧接上文」尾句改为预先一次算完 | 提示词不再依赖上一块的模型输出，成为并行的前置条件 |
+| 166 | pipeline.review_document | 分块并发送审（`concurrency`，默认 1） | 服务端支持并行时（OLLAMA_NUM_PARALLEL）长文档审查成倍加速 |
+| 167 | pipeline.review_document | 并发下按分块序号回收结果 + 线程内异常隔离 | 并发不改变批注编号与顺序，单块线程异常也不会拖垮整篇 |
+| 168 | pipeline._output_budget | 按本块字数自适应 `num_predict`（1024–8192） | 长块不再因输出被硬截断而整片丢批注 |
+| 169 | review.cap_per_block | 同一段落批注上限（按严重度取前 N，优先保住实体改动） | 压掉「一段挑出十几条鸡毛蒜皮」的噪声 |
+| 170 | docmodel.export_docx | 新增 `anns` 参数：写 `word/comments.xml` 并在正文插入 commentRangeStart/End/Reference | 导出真正的 Word 原生批注，可在 Word 里逐条查看与回复 |
+| 171 | 设置页 / 导出菜单 | 并发度、每段上限选择器；「Word · 批注版」入口 | 新能力可达；批注版全被丢弃时给出明确提示而不是导出一份空批注 |

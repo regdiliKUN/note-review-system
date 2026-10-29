@@ -480,9 +480,39 @@ def relocate(a: Dict[str, Any], block: Dict[str, Any]) -> Optional[Dict[str, Any
     return nb
 
 
-def finalize(anns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """收尾：消解冲突 → 按严重度排序 → 重排 id。"""
+MAX_PER_BLOCK = 6
+
+
+def cap_per_block(anns: List[Dict[str, Any]], limit: int = MAX_PER_BLOCK
+                  ) -> List[Dict[str, Any]]:
+    """同一段落最多保留 N 条批注（按严重度取前 N）。
+
+    模型偶尔会对一段话挑出十几条鸡毛蒜皮，把真正重要的问题淹没掉。
+    默认上限 6 条；`limit<=0` 表示不限制。
+    """
+    if limit <= 0:
+        return anns
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for a in anns:
+        buckets.setdefault(a.get("block_id") or "", []).append(a)
+    out: List[Dict[str, Any]] = []
+    for _bid, group in buckets.items():
+        if len(group) <= limit:
+            out.extend(group)
+            continue
+        # 结构建议/存疑待核这类「提示型」批注排在后面，优先保住实体改动
+        group = sorted(group, key=lambda a: (SEVERITY_ORDER.get(a.get("severity"), 1),
+                                             a.get("op") == "comment"))
+        out.extend(group[:limit])
+    return out
+
+
+def finalize(anns: List[Dict[str, Any]],
+             max_per_block: int = 0) -> List[Dict[str, Any]]:
+    """收尾：消解冲突 → 限制每段条数 → 按严重度排序 → 重排 id。"""
     out = dedupe_conflicts(anns)
+    if max_per_block:
+        out = cap_per_block(out, max_per_block)
     out.sort(key=lambda a: (SEVERITY_ORDER.get(a.get("severity"), 1),
                             int(a["block_id"][1:]) if a["block_id"][1:].isdigit() else 0))
     for i, a in enumerate(out):

@@ -90,6 +90,7 @@ class Api:
         self._lock = threading.Lock()
         # 审查取消信号：长文档用 8B 模型要跑十几分钟，必须能中途停下
         self._cancel = threading.Event()
+        self._last_failed_blocks: list = []
         # 支持「把文件拖到快捷方式/图标上」直接打开
         self.pending_path = None
         for a in sys.argv[1:]:
@@ -119,6 +120,8 @@ class Api:
             "history_keep_days": 0,
             "review_level": "normal",
             "review_scenario": "general",
+            "review_concurrency": 1,
+            "review_max_per_block": 0,
             "glossary": [],
             "relayout": dict(RELAYOUT_DEFAULTS),
             "recent": [],
@@ -249,6 +252,8 @@ class Api:
             "scenarios": [{"key": k, "label": v[0]}
                           for k, v in pipeline.REVIEW_SCENARIOS.items()],
             "glossary": self.cfg.get("glossary", []),
+            "reviewConcurrency": int(self.cfg.get("review_concurrency", 1) or 1),
+            "reviewMaxPerBlock": int(self.cfg.get("review_max_per_block", 0) or 0),
             "recent": self.cfg.get("recent", [])[:8],
             "pending": self.pending_path,
             "history": self.history_info(),
@@ -501,6 +506,7 @@ class Api:
         self.blocks_current = parsed["blocks"]
         self._img_doc = None          # 让图片计数缓存失效
         self._view_cache = None
+        self._last_failed_blocks = []
 
     def choose_images(self) -> dict:
         """一次选多张图片，合成一篇图片笔记。"""
@@ -660,6 +666,8 @@ class Api:
                 "title": self.doc.get("title", ""),
                 # 段落文本指纹：下次增量审查据此判断「哪些段落没变、批注可以复用」
                 "block_hashes": {b["id"]: _text_hash(b) for b in self.doc["blocks"]},
+                # 本次没能审到的段落：增量审查会强制重审，绝不当作「已审过」
+                "failed_blocks": list(self._last_failed_blocks),
             }
             entry = self.history.save(self.doc["path"], snap)
             self.history_current = {"id": entry["id"], "ts": entry.get("ts") or "",
@@ -966,7 +974,10 @@ class Api:
         by_block: dict = {}
         for a in (snap.get("anns") or []):
             by_block.setdefault(a.get("block_id"), []).append(a)
-        seen = {h for h in hashes.values() if h}
+        # 上次失败（或取消）的段落不能算「已审过」——它们的指纹要从可复用集合里摘掉，
+        # 否则增量审查会永远跳过这几段，用户看到的是一份悄悄缺角的审查结果。
+        failed = set(snap.get("failed_blocks") or [])
+        seen = {h for bid, h in hashes.items() if h and bid not in failed}
         pools: dict = {}
         for bid, h in hashes.items():
             if not h:
@@ -1069,7 +1080,14 @@ class Api:
                 glossary=self.cfg.get("glossary") or [],
                 should_stop=self._cancel.is_set,
                 only_ids=only_ids,
-                scenario=str(self.cfg.get("review_scenario") or "general"))
+                scenario=str(self.cfg.get("review_scenario") or "general"),
+                concurrency=int(self.cfg.get("review_concurrency", 1) or 1),
+                max_per_block=int(self.cfg.get("review_max_per_block", 0) or 0))
+            # 记下失败的段落：下一次增量审查必须强制重审它们，
+            # 否则「文字没改 → 直接复用上次结果」会把这几段永久漏掉。
+            self._last_failed_blocks = sorted({
+                bid for f in (rep.get("failed") or []) for bid in (f.get("blocks") or [])
+            })
             if incremental and reused:
                 self.anns = review.finalize(reused + new_anns)
             else:
@@ -1266,8 +1284,9 @@ class Api:
 
     # ------------------------------------------------------------ 重排
     def set_review_opts(self, level: str = "", glossary=None,
-                        scenario: str = "") -> dict:
-        """审校力度、术语白名单与笔记场景。留空表示不改。"""
+                        scenario: str = "", concurrency: int = -1,
+                        max_per_block: int = -1) -> dict:
+        """审校力度、术语白名单、笔记场景、并发度、每段批注上限。留空/负数表示不改。"""
         if scenario:
             if scenario not in pipeline.REVIEW_SCENARIOS:
                 return {"ok": False, "error": f"未知的笔记场景：{scenario}"}
@@ -1285,10 +1304,16 @@ class Api:
                 if g and g not in terms:
                     terms.append(g)
             self.cfg["glossary"] = terms[:200]
+        if concurrency is not None and int(concurrency) >= 0:
+            self.cfg["review_concurrency"] = max(0, min(int(concurrency), 8))
+        if max_per_block is not None and int(max_per_block) >= 0:
+            self.cfg["review_max_per_block"] = max(0, min(int(max_per_block), 20))
         self._save_cfg()
         return {"ok": True, "reviewLevel": self.cfg.get("review_level", "normal"),
                 "reviewScenario": self.cfg.get("review_scenario", "general"),
-                "glossary": self.cfg.get("glossary", [])}
+                "glossary": self.cfg.get("glossary", []),
+                "reviewConcurrency": int(self.cfg.get("review_concurrency", 1) or 1),
+                "reviewMaxPerBlock": int(self.cfg.get("review_max_per_block", 0) or 0)}
 
     def _rebuild_relayout(self):
         if not self.relayout_on or not self.doc:
@@ -1313,6 +1338,7 @@ class Api:
             return {"ok": False}
         base = os.path.splitext(os.path.basename(self.doc["path"]))[0]
         suffix = {"original": "_原版", "revised": "_修正版", "relayout": "_重排版",
+                  "commented": "_批注版",
                   "report": "_审阅报告", "csv": "_批注清单",
                   "summary": "_内容归纳"}.get(kind, "_修正版")
         default = base + suffix + time.strftime("_%Y%m%d", time.localtime())
@@ -1344,6 +1370,16 @@ class Api:
         # 修正版/重排版追加「图像说明与核对」，让总结覆盖图像部分
         if kind != "original" and self.image_report:
             blocks = list(blocks) + docmodel.image_report_blocks(self.image_report)
+        # 「批注版」：原版正文 + Word 原生批注。
+        # 必须用原版做底稿 —— 批注锚点是按原文偏移算的，套在修正后文本上会整体错位。
+        commented = kind == "commented"
+        if commented:
+            live = [a for a in self.anns if a.get("status") != "rejected"]
+            if not self.anns:
+                return {"ok": False, "error": "还没有批注可以导出，请先运行一次审查"}
+            if not live:
+                return {"ok": False, "error": "所有批注都已被丢弃，批注版没有内容可导出"}
+            blocks = self.doc["blocks"]
         fmt = (fmt or "").lower().lstrip(".")
         # 用户在保存对话框里手打了扩展名时，以扩展名为准 ——
         # 否则会出现「文件名叫 笔记.md，内容却是 docx」这种打不开的情况。
@@ -1363,7 +1399,11 @@ class Api:
         asset_dir = self.doc["asset_dir"]
         try:
             if fmt == "docx":
-                docmodel.export_docx(blocks, asset_dir, out_path, self.doc["title"])
+                if commented:
+                    docmodel.export_docx(blocks, asset_dir, out_path, self.doc["title"],
+                                         anns=self.anns)
+                else:
+                    docmodel.export_docx(blocks, asset_dir, out_path, self.doc["title"])
             elif fmt == "html":
                 docmodel.export_html(blocks, asset_dir, out_path, self.doc["title"])
             elif fmt == "md":

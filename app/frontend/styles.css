@@ -531,6 +531,12 @@ input,select{font-family:inherit;font-size:inherit}
 .hist-dir-row input{flex:1;font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:11.5px;color:var(--txt-2)}
 .asr-row{display:flex;gap:8px;margin-top:8px}
 .asr-row input{flex:1}
+.asr-row select{
+  flex:1;height:32px;padding:0 8px;border-radius:7px;
+  background:var(--panel-2);border:1px solid var(--border);color:var(--txt-2);
+  font-size:12.5px;outline:none;cursor:pointer;
+}
+.asr-row select:focus{border-color:var(--accent)}
 .cap-line{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
 .cap-chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px;border-radius:999px;
   font-size:11px;background:var(--panel-2);color:var(--txt-3);border:1px solid var(--border)}
